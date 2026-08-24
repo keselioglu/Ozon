@@ -5,10 +5,12 @@
 deferred_items.json
 category_processed_log.txt
 processed_log.txt
+failed_urls.txt
 attrs_panties.txt
 category_tree_clothing.txt
 category_tree_top.txt
 colors_dictionary.txt
+daily_run_*.log
 __pycache__/
 *.pyc
 .venv/

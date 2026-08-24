@@ -16,6 +16,12 @@ How this works: add new tasks under **Todo**. When we start one, it moves to **I
 
 ---
 
+## Daily Run Log
+
+*(empty — daily_run.py appends one line here per run)*
+
+---
+
 ## Done
 
 - ~~Build M&S product crawler (single URL + category discovery)~~ — 2026-08-24
