@@ -43,6 +43,29 @@ def log(msg):
         f.write(line + "\n")
 
 
+# Files the pipeline writes to that a person could plausibly have open in Excel
+# (Windows locks a file against other writers while it's open there) — checked
+# before the run starts so a lock fails fast with a clear message instead of a
+# crawler traceback halfway through discovery.
+LOCK_CHECK_FILES = ["products.csv", "category_priority.csv", "legacy_product_urls.csv"]
+
+
+def check_for_file_locks():
+    """Returns a list of filenames that exist and can't currently be opened for
+    writing (most likely because they're open in Excel or another program)."""
+    locked = []
+    for name in LOCK_CHECK_FILES:
+        path = REPO_DIR / name
+        if not path.exists():
+            continue
+        try:
+            with open(path, "a", encoding="utf-8"):
+                pass
+        except PermissionError:
+            locked.append(name)
+    return locked
+
+
 def run_step(name, args, timeout=1800):
     """Runs one pipeline step as a subprocess, streaming+logging its output.
     Returns (success, combined_output)."""
@@ -124,6 +147,16 @@ def update_tasks_md(summary_line):
 
 def main():
     log(f"===== Daily run starting: {TODAY} =====")
+
+    locked = check_for_file_locks()
+    if locked:
+        reason = (
+            f"{', '.join(locked)} could not be opened for writing — probably open in "
+            "Excel or another program on this machine. Close it and re-run."
+        )
+        log(f"BLOCKED: {reason}")
+        _finalize_failed_run(reason)
+        return
 
     counts = {"crawled": "?", "translated": 0, "translated_codes": [],
               "uploaded_ok": "?", "uploaded_failed": "?", "stock_ok": "?", "stock_failed": "?"}

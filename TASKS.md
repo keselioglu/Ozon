@@ -17,9 +17,8 @@ How this works: add new tasks under **Todo**. When we start one, it moves to **I
 ---
 
 ## Daily Run Log
-- 2026-08-24: FAILED — Crawl step failed — see log for details.
 
-*(empty — daily_run.py appends one line here per run)*
+- 2026-08-24: FAILED — Crawl step failed (products.csv was locked, open in Excel) — see log for details.
 
 ---
 
