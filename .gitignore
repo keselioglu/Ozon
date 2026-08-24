@@ -1,5 +1,7 @@
 .env
 *.csv
+!category_priority.csv
+!legacy_product_urls.csv
 *_log.txt
 *.jsonl
 deferred_items.json

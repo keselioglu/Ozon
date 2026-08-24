@@ -1,13 +1,22 @@
 """
 Unattended daily pipeline entry point, intended to be invoked by Windows Task
-Scheduler once a day. Runs, in order: crawl -> auto-translate new products ->
-upload -> verify -> sync stock -> log to TASKS.md -> commit & push.
+Scheduler once a day. Runs, in order:
+  1. Priority-ordered category discovery (category_priority.py) — walks
+     category_priority.csv from priority 1, queuing any not-yet-live products
+     from the first category that has some, into product_urls.txt.
+  2. Crawl (crawler.py) — processes whatever's newly queued in product_urls.txt.
+  3. Auto-translate new products.
+  4. Upload.
+  5. Verify.
+  6. Sync stock for today's crawled/uploaded rows (update_stocks.py).
+  7. Refresh stock for all live M&S-sourced Ozon products with a known source
+     URL, whether or not this pipeline crawled them today (refresh_live_stock.py).
+  8. Log to TASKS.md, commit & push.
 
-Each step is a subprocess call to the existing, already-working scripts
-(crawler.py, upload_to_ozon.py, check_upload_status.py, update_stocks.py) plus
-the new auto_translate.py. This script does not reimplement their logic — it
-only sequences them and stops on the first step that fails in a way its own
-error handling doesn't already cover, rather than retrying blindly.
+Each step is a subprocess call to the existing, already-working scripts. This
+script does not reimplement their logic — it only sequences them and stops on
+the first step that fails in a way its own error handling doesn't already
+cover, rather than retrying blindly.
 
 All output is appended to daily_run_<date>.log (gitignored, like the other
 *_log.txt state files) so a run can be inspected after the fact even though
@@ -120,14 +129,27 @@ def main():
               "uploaded_ok": "?", "uploaded_failed": "?", "stock_ok": "?", "stock_failed": "?"}
     attention = []
 
-    # 1. Crawl
+    # 1. Priority-ordered category discovery — finds the first category (in
+    # priority order) with a product not yet live on Ozon, and queues it into
+    # product_urls.txt for the crawl step below to pick up. Not a hard failure
+    # if this step errors — crawler.py can still process anything already
+    # queued from a previous run, so log and continue rather than stopping.
+    ok, discovery_output = run_step("Category discovery (category_priority.py)", ["category_priority.py"], timeout=3600)
+    if not ok:
+        log("Category discovery failed — continuing to crawl step with whatever's already queued.")
+        attention.append("Category discovery step failed — see log for details.")
+    elif "Summary:" in discovery_output:
+        summary_line = next((l for l in discovery_output.splitlines() if l.startswith("Summary:")), "")
+        counts["discovery_summary"] = summary_line
+
+    # 2. Crawl
     ok, _ = run_step("Crawl (crawler.py)", ["crawler.py"], timeout=3600)
     if not ok:
         log("Crawl step failed — stopping run. Not proceeding to translate/upload with stale data.")
         _finalize_failed_run("Crawl step failed — see log for details.")
         return
 
-    # 2. Auto-translate any new products
+    # 3. Auto-translate any new products
     ok, translate_output = run_step("Auto-translate (auto_translate.py)", ["auto_translate.py"], timeout=1800)
     if not ok:
         log("Translate step failed — stopping run rather than uploading with an inconsistent translations file.")
@@ -149,7 +171,7 @@ def main():
             + ", ".join(counts["translated_codes"])
         )
 
-    # 3 & 4. Upload (quota capping/dedup/batching handled inside upload_to_ozon.py)
+    # 4. Upload (quota capping/dedup/batching handled inside upload_to_ozon.py)
     ok, _ = run_step("Upload (upload_to_ozon.py)", ["upload_to_ozon.py"], timeout=1800)
     if not ok:
         log("Upload step failed — stopping run before stock sync.")
@@ -165,18 +187,30 @@ def main():
         totals_line = next(l for l in verify_output.splitlines() if l.startswith("Totals:"))
         counts["upload_totals"] = totals_line
 
-    # 6. Sync stock
+    # 6. Sync stock for today's crawled/uploaded rows
     ok, stock_output = run_step("Stock sync (update_stocks.py)", ["update_stocks.py"], timeout=1800)
     if "Done." in stock_output:
         done_line = next((l for l in stock_output.splitlines() if l.startswith("Done.")), "")
         counts["stock_summary"] = done_line
 
-    # 7. Update TASKS.md
+    # 7. Refresh stock for all live M&S-sourced products with a known source
+    # URL (covers products this pipeline didn't crawl today, or ever). Not a
+    # hard failure — log and continue to the TASKS.md update either way.
+    ok, live_stock_output = run_step("Live stock refresh (refresh_live_stock.py)", ["refresh_live_stock.py"], timeout=3600)
+    if not ok:
+        attention.append("Live stock refresh step failed — see log for details.")
+    elif "Done." in live_stock_output:
+        done_line = next((l for l in live_stock_output.splitlines() if l.startswith("Done.")), "")
+        counts["live_stock_summary"] = done_line
+
+    # 8. Update TASKS.md
     summary = (
-        f"{TODAY}: translated {counts['translated']} "
+        f"{TODAY}: {counts.get('discovery_summary', 'discovery status unknown')}, "
+        f"translated {counts['translated']} "
         f"({', '.join(counts['translated_codes']) if counts['translated_codes'] else 'none'}), "
         f"{counts.get('upload_totals', 'upload status unknown')}, "
-        f"{counts.get('stock_summary', 'stock sync status unknown')}"
+        f"{counts.get('stock_summary', 'stock sync status unknown')}, "
+        f"{counts.get('live_stock_summary', 'live stock refresh status unknown')}"
     )
     update_tasks_md(summary)
     git_commit_and_push(f"Daily run log: {TODAY}")
