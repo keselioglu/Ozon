@@ -1,0 +1,15 @@
+.env
+*.csv
+*_log.txt
+*.jsonl
+deferred_items.json
+category_processed_log.txt
+processed_log.txt
+attrs_panties.txt
+category_tree_clothing.txt
+category_tree_top.txt
+colors_dictionary.txt
+__pycache__/
+*.pyc
+.venv/
+sample_page*.html
