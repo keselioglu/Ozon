@@ -1,5 +1,5 @@
 """
-Daily stock refresh for M&S-sourced products already live on Ozon (MS-* offer_ids).
+Daily stock refresh for M&S-sourced products already live on Ozon.
 
 Unlike update_stocks.py (which only pushes stock for rows already sitting in
 products.csv from a crawl), this re-fetches each live product's actual M&S page
@@ -7,15 +7,26 @@ today and pushes a fresh stock count — covering products this pipeline never
 directly crawled (older manual uploads), as long as their M&S source URL is
 known.
 
+Covers every offer_id prefix legacy_product_urls.csv has a mapping for (MS-,
+MAR-, SML-, MARKS-, MARK- observed live), not just this pipeline's own MS-
+convention — the same M&S product line is sold under several different past
+manual-upload naming conventions (see upload_to_ozon.py's duplicate-prevention
+check), and each of those offer_ids sells real inventory that needs its own
+correct stock. legacy_product_urls.csv maps each offer_id directly to its own
+M&S URL, so no color/prefix guessing is needed — each offer_id's size is
+matched against ITS OWN page independently.
+
 Source of URLs, in priority order:
   1. legacy_product_urls.csv — a direct offer_id -> M&S URL mapping the business
      supplied for products uploaded before this pipeline tracked source URLs.
+     Covers multiple prefixes (MS-, MAR-, SML-, MARKS-, MARK-).
   2. products.csv — this pipeline's own crawl history (ms_article_code/parent_sku
-     matched against live offer_ids, same logic as category_priority.py).
+     matched against live MS-* offer_ids only, same logic as category_priority.py)
+     — this source only ever applies to our own MS- uploads, since only those
+     rows carry a recorded crawl URL.
 
-Live MS-* offer_ids with no URL in either source are left untouched — not
-modified, not reported as broken. That's most of the ~10,900 legacy catalog
-until legacy_product_urls.csv is extended to cover them.
+Live offer_ids with no URL in either source are left untouched — not
+modified, not reported as broken.
 """
 import sys
 import time
@@ -50,6 +61,34 @@ def load_legacy_url_map(path=LEGACY_URL_MAP_FILE):
     return dict(zip(df["ID"], df["URL"]))
 
 
+def fetch_live_offer_ids_matching(candidate_offer_ids):
+    """Returns (matching_live_offer_ids, total_live_count) — the subset of
+    candidate_offer_ids that are currently live on Ozon (any prefix), plus
+    the total live product count from the same pagination pass. Avoids
+    assuming a prefix, since legacy_product_urls.csv covers MS-, MAR-,
+    SML-, MARKS-, and MARK- offer_ids."""
+    candidates = set(candidate_offer_ids)
+    live_matches = set()
+    total_live = 0
+    cursor = ""
+    while True:
+        params = {"filter": {}, "limit": 1000}
+        if cursor:
+            params["last_id"] = cursor
+        result = call("/v3/product/list", params)
+        page = result.get("result", {})
+        items = page.get("items", [])
+        total_live += len(items)
+        for item in items:
+            oid = item.get("offer_id", "")
+            if oid in candidates:
+                live_matches.add(oid)
+        cursor = page.get("last_id")
+        if not cursor or not items:
+            break
+    return live_matches, total_live
+
+
 def load_pipeline_url_map(live_offer_ids, path=PRODUCTS_CSV):
     """offer_id -> M&S URL, derived by matching products.csv's ms_article_code/
     parent_sku against live offer_ids (substring match, same as category_priority's
@@ -75,9 +114,17 @@ def load_pipeline_url_map(live_offer_ids, path=PRODUCTS_CSV):
 
 
 def extract_size_token(offer_id):
-    """MS-T61004100-KAHVE-34 -> '34', MS-T81006849L-PINKMIX-40 -> '40'.
-    The size/RU-size token is always the last hyphen-separated segment."""
-    return offer_id.rsplit("-", 1)[-1] if "-" in offer_id else None
+    """MS-T61004100-KAHVE-34 -> '34', MS-T81006849L-PINKMIX-40 -> '40',
+    MAR-T61005100X-46EU -> '46' (legacy MAR- offer_ids append a literal 'EU'
+    suffix on numeric sizes — confirmed on real data — which this strips so
+    it lines up with the plain EU number extracted from a fresh M&S page).
+    The size token is always the last hyphen-separated segment."""
+    if "-" not in offer_id:
+        return None
+    token = offer_id.rsplit("-", 1)[-1]
+    if token.endswith("EU") and token[:-2].isdigit():
+        return token[:-2]
+    return token
 
 
 def build_stock_updates_for_url(url, offer_ids_for_url):
@@ -165,24 +212,29 @@ def push_stock_updates(updates):
 
 
 def main():
-    print("Fetching live MS-* offer_ids from Ozon...")
-    live_offer_ids = fetch_live_ms_identifiers()
-    print(f"{len(live_offer_ids)} MS-* offer_id(s) live.\n")
+    print("Fetching live MS-* offer_ids from Ozon (for products.csv-derived matching)...")
+    live_ms_offer_ids = fetch_live_ms_identifiers()
+    print(f"{len(live_ms_offer_ids)} MS-* offer_id(s) live.\n")
 
     legacy_map = load_legacy_url_map()
-    print(f"{len(legacy_map)} offer_id(s) have a known URL via {LEGACY_URL_MAP_FILE}.")
+    print(f"{len(legacy_map)} offer_id(s) have a known URL via {LEGACY_URL_MAP_FILE} "
+          f"(covers MS-, MAR-, SML-, MARKS-, MARK- prefixes).")
 
-    pipeline_map = load_pipeline_url_map(live_offer_ids)
+    pipeline_map = load_pipeline_url_map(live_ms_offer_ids)
     print(f"{len(pipeline_map)} offer_id(s) have a known URL via {PRODUCTS_CSV} crawl history.\n")
 
     # legacy map takes priority since it's an exact per-offer_id mapping;
-    # pipeline map fills in anything legacy didn't cover.
+    # pipeline map fills in anything legacy didn't cover. Confirm each
+    # candidate is actually still live before including it — legacy_product_urls.csv
+    # isn't prefix-filtered, so this is the only place scope narrows to "live now".
     url_for_offer_id = {**pipeline_map, **legacy_map}
-    known_offer_ids = set(url_for_offer_id) & live_offer_ids
-    unknown_count = len(live_offer_ids) - len(known_offer_ids)
+    print("Confirming which of those offer_ids are actually live right now...")
+    known_offer_ids, total_live = fetch_live_offer_ids_matching(url_for_offer_id.keys())
+    unknown_count = total_live - len(known_offer_ids)
 
-    print(f"{len(known_offer_ids)} live offer_id(s) have a resolvable M&S URL — will be refreshed today.")
-    print(f"{unknown_count} live offer_id(s) have no known source URL — left untouched.\n")
+    print(f"{total_live} product(s) live on the account in total.")
+    print(f"{len(known_offer_ids)} of them have a resolvable M&S URL — will be refreshed today.")
+    print(f"{unknown_count} have no known source URL — left untouched.\n")
 
     if not known_offer_ids:
         return print("Nothing to refresh.")
