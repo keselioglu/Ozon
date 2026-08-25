@@ -7,6 +7,7 @@ even though this runs fully automatically without pausing for confirmation.
 """
 import json
 import os
+import re
 import sys
 import time
 
@@ -41,6 +42,17 @@ DEFERRED_LOG = "deferred_items.json"
 
 TRY_TO_USD_RATE = 0.083
 MERGE_ATTR_ID = 8292  # "Merge on One PDP" — grouping key so size/color variants share one product page
+
+# The account carries this M&S product line under several different offer_id
+# conventions from past manual uploads (MAR-, MARKS-, SML-MAR-, SMLMS- observed
+# live — confirmed 2026-08-25: 471 rows already duplicated under MS- for a
+# product line already live under MAR-, sometimes with only the color name
+# translated differently, e.g. MS-T61002005X-ROSEQUARTZ vs MAR-T61002005X-KUVARS
+# for the same "rose quartz" color in Turkish). Rather than track every prefix
+# by name, this matches the M&S article code pattern itself (e.g. T81006849L,
+# T61002030X) wherever it appears in an offer_id, so a new naming convention
+# doesn't silently slip past this check the way MAR- originally did.
+MS_ARTICLE_CODE_IN_OFFER_ID_RE = re.compile(r"T\d{5,9}[A-Z]{0,2}")
 
 # Package weight/dims are not provided by M&S's page; these are reasonable estimates
 # for folded underwear in a poly bag, scaled by pack count. Spot-check after first listing.
@@ -201,6 +213,35 @@ def find_existing_offer_ids(offer_ids):
     return existing
 
 
+def fetch_live_article_codes_by_prefix():
+    """Scans EVERY live offer_id on the account (not just our own MS- ones) and
+    returns {article_code: set_of_offer_id_prefixes_it_appears_under}, using
+    MS_ARTICLE_CODE_IN_OFFER_ID_RE to find the M&S article code wherever it's
+    embedded, regardless of naming convention. Used to skip creating a new
+    MS- listing for a product already sold under a different prefix (MAR-,
+    SML-MAR-, SMLMS-, etc.) — see the comment on MS_ARTICLE_CODE_IN_OFFER_ID_RE."""
+    codes_to_prefixes = {}
+    cursor = ""
+    while True:
+        params = {"filter": {}, "limit": 1000}
+        if cursor:
+            params["last_id"] = cursor
+        result = call("/v3/product/list", params)
+        page = result.get("result", {})
+        items = page.get("items", [])
+        for item in items:
+            oid = item.get("offer_id", "")
+            m = MS_ARTICLE_CODE_IN_OFFER_ID_RE.search(oid)
+            if m:
+                code = m.group(0)
+                prefix = oid.split("-", 1)[0]
+                codes_to_prefixes.setdefault(code, set()).add(prefix)
+        cursor = page.get("last_id")
+        if not cursor or not items:
+            break
+    return codes_to_prefixes
+
+
 def load_deferred_items():
     try:
         with open(DEFERRED_LOG, "r", encoding="utf-8") as f:
@@ -223,9 +264,30 @@ def main():
 
     print(f"{len(df)} variant rows loaded from {PRODUCTS_CSV}\n")
 
+    print("Checking live catalog for this article code under any other offer_id naming convention...")
+    live_article_codes = fetch_live_article_codes_by_prefix()
+    print(f"{len(live_article_codes)} distinct M&S article code(s) found live across the whole account.\n")
+
     items = []
     skipped = 0
     for _, row in df.iterrows():
+        article_code = row.get("ms_article_code")
+        live_prefixes = live_article_codes.get(article_code, set())
+        if live_prefixes - {"MS"}:
+            skipped += 1
+            reason = (
+                f"Article {article_code} is already live under a different offer_id prefix "
+                f"({', '.join(sorted(live_prefixes - {'MS'}))}) — skipping to avoid a duplicate listing, "
+                "even though the color/size may differ."
+            )
+            with open(SKIPPED_LOG, "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "sku": row.get("variant_sku"), "name": row.get("name"),
+                    "reasons": [reason],
+                }, ensure_ascii=False) + "\n")
+            print(f"SKIP {row.get('variant_sku')} ({row.get('name')}): {reason}")
+            continue
+
         item, warnings = build_ozon_item(row)
         if item is None:
             skipped += 1
