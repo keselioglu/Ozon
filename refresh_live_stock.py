@@ -49,6 +49,7 @@ WAREHOUSE_ID = 1020000320456000  # "Ozpark Bee Concept" — the account's only w
 FALLBACK_STOCK = 20
 BATCH_SIZE = 100  # Ozon's max per /v2/products/stocks call
 REFETCH_LOG = "stock_refresh_skipped.jsonl"
+UNMATCHED_SUMMARY_FILE = "unmatched_offer_ids.txt"
 
 
 def load_legacy_url_map(path=LEGACY_URL_MAP_FILE):
@@ -128,16 +129,20 @@ def extract_size_token(offer_id):
 
 
 def build_stock_updates_for_url(url, offer_ids_for_url):
-    """Re-fetches one M&S product page and returns [{offer_id, stock}, ...] for
-    every offer_id in offer_ids_for_url whose size matches a variant on the page.
-    An offer_id with no matching size variant is skipped and logged, not guessed."""
+    """Re-fetches one M&S product page and returns (updates, unmatched, warning):
+    updates is [{offer_id, stock}, ...] for every offer_id whose size matches a
+    variant on the page; unmatched is the exact list of offer_ids that couldn't
+    be matched (these represent a real discrepancy worth investigating — e.g. a
+    size Ozon still lists that M&S no longer sells in this color, confirmed on
+    real data, see MS-T61008800T-ROSEQUARTZ-54); warning is a human-readable
+    summary or None. An unmatched offer_id's stock is never guessed or changed."""
     try:
         variant_rows = extract_product(url)
     except Exception as e:
-        return [], f"fetch error: {e}"
+        return [], list(offer_ids_for_url), f"fetch error: {e}"
 
     if not variant_rows:
-        return [], "no product data found on page"
+        return [], list(offer_ids_for_url), "no product data found on page"
 
     # Match each fresh page variant to an offer_id by its size token. This can't
     # assume the offer_id's trailing token was built via ozon_mapping's UK->RU
@@ -174,7 +179,7 @@ def build_stock_updates_for_url(url, offer_ids_for_url):
             unmatched.append(offer_id)
 
     warning = f"{len(unmatched)} offer_id(s) had no matching size on the fresh page" if unmatched else None
-    return updates, warning
+    return updates, unmatched, warning
 
 
 def push_stock_updates(updates):
@@ -248,21 +253,34 @@ def main():
     print(f"{len(offer_ids_by_url)} distinct product page(s) to re-fetch.\n")
 
     all_updates = []
+    all_unmatched = []
     fetch_failures = 0
     for i, (url, offer_ids) in enumerate(offer_ids_by_url.items(), 1):
         print(f"[{i}/{len(offer_ids_by_url)}] {url} ({len(offer_ids)} offer_id(s))")
-        updates, warning = build_stock_updates_for_url(url, offer_ids)
+        updates, unmatched, warning = build_stock_updates_for_url(url, offer_ids)
         if warning:
-            print(f"  ! {warning}")
+            print(f"  ! {warning}: {unmatched}")
             with open(REFETCH_LOG, "a", encoding="utf-8") as f:
                 import json
-                f.write(json.dumps({"url": url, "offer_ids": offer_ids, "warning": warning}, ensure_ascii=False) + "\n")
+                f.write(json.dumps({
+                    "url": url, "offer_ids": offer_ids, "warning": warning,
+                    "unmatched_offer_ids": unmatched,
+                }, ensure_ascii=False) + "\n")
         if not updates and warning and "fetch error" in warning:
             fetch_failures += 1
         all_updates.extend(updates)
+        all_unmatched.extend(unmatched)
         time.sleep(1.2)  # be polite to M&S, same pacing as crawler.py
 
     print(f"\n{len(all_updates)} stock update(s) ready to push ({fetch_failures} page(s) failed to fetch entirely).\n")
+
+    if all_unmatched:
+        print(f"{len(all_unmatched)} live offer_id(s) had NO matching size on their M&S page today — "
+              f"their stock was left as-is (not guessed). This usually means the offer_id represents a "
+              f"size/color combination M&S no longer sells. Full list in {UNMATCHED_SUMMARY_FILE}.\n")
+        with open(UNMATCHED_SUMMARY_FILE, "w", encoding="utf-8") as f:
+            for oid in sorted(set(all_unmatched)):
+                f.write(oid + "\n")
 
     if not all_updates:
         return print("Nothing to push.")
