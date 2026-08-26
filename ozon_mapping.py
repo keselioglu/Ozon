@@ -4,8 +4,25 @@ Maps M&S product attributes onto Ozon's controlled dictionaries
 """
 import difflib
 import json
+import re
 
 from ozon_client import call
+
+# Matches the M&S article code embedded in an offer_id regardless of naming
+# convention/prefix (MS-, MAR-, SML-MAR-, SMLMS-, etc. all embed it the same
+# way — confirmed live, see upload_to_ozon.py's duplicate-prevention check).
+# Does NOT match legacy numeric-SKU offer_ids (e.g. "MS-10000000601019-S") —
+# those are identified by parent_sku substring match instead, see
+# extract_article_code_from_offer_id below.
+ARTICLE_CODE_IN_OFFER_ID_RE = re.compile(r"T\d{5,9}[A-Z]{0,2}")
+
+
+def extract_article_code_from_offer_id(offer_id):
+    """Returns the M&S article code embedded in offer_id (e.g. 'T61008800T'),
+    or None if this offer_id uses the legacy numeric-SKU convention instead
+    (caller should fall back to matching on parent_sku in that case)."""
+    m = ARTICLE_CODE_IN_OFFER_ID_RE.search(offer_id)
+    return m.group(0) if m else None
 
 CATEGORY_ID = 200001517
 TYPE_ID_PANTIES = 93238          # "Underwear Trunks/Panties" — single-item briefs/knickers

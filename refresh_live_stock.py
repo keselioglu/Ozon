@@ -39,7 +39,7 @@ if sys.platform == "win32":
 
 from crawler import extract_product
 from ozon_client import call
-from ozon_mapping import extract_eu_size, extract_letter_size
+from ozon_mapping import extract_article_code_from_offer_id, extract_eu_size, extract_letter_size
 from category_priority import fetch_live_ms_identifiers
 
 LEGACY_URL_MAP_FILE = "legacy_product_urls.csv"
@@ -48,7 +48,9 @@ WAREHOUSE_ID = 1020000320456000  # "Ozpark Bee Concept" — the account's only w
 FALLBACK_STOCK = 20
 BATCH_SIZE = 100  # Ozon's max per /v2/products/stocks call
 REFETCH_LOG = "stock_refresh_skipped.jsonl"
+WRONG_URL_LOG = "stock_refresh_wrong_url.jsonl"
 UNMATCHED_SUMMARY_FILE = "unmatched_offer_ids.txt"
+WRONG_URL_SUMMARY_FILE = "wrong_url_offer_ids.txt"
 
 
 def load_legacy_url_map(path=LEGACY_URL_MAP_FILE):
@@ -127,21 +129,65 @@ def extract_size_token(offer_id):
     return token
 
 
+def verify_url_matches_offer_id(offer_id, page_article_code, page_parent_sku):
+    """Confirms the page we're about to trust for offer_id's stock is actually
+    THIS product, not some other product that happens to share a URL mapping
+    entry (e.g. a stale/wrong row in legacy_product_urls.csv, or two products
+    whose SKUs were transposed when the mapping was compiled). Checks the
+    offer_id's own embedded identifier — article code for T-coded products,
+    parent_sku for legacy numeric-SKU offer_ids — against what the fresh page
+    itself reports. Returns True only when we have a positive match; an
+    offer_id with neither identifier resolvable is treated as unverifiable
+    (False) rather than trusted by default."""
+    offer_article_code = extract_article_code_from_offer_id(offer_id)
+    if offer_article_code:
+        return page_article_code is not None and str(page_article_code) == offer_article_code
+
+    # Legacy numeric-SKU offer_id (e.g. "MS-10000000601019-S") — the SKU is
+    # embedded directly, check it against the page's own parent_sku.
+    for token in offer_id.split("-"):
+        if token.isdigit() and len(token) >= 9 and page_parent_sku and str(page_parent_sku) == token:
+            return True
+    return False
+
+
 def build_stock_updates_for_url(url, offer_ids_for_url):
-    """Re-fetches one M&S product page and returns (updates, unmatched, warning):
-    updates is [{offer_id, stock}, ...] for every offer_id whose size matches a
-    variant on the page; unmatched is the exact list of offer_ids that couldn't
-    be matched (these represent a real discrepancy worth investigating — e.g. a
-    size Ozon still lists that M&S no longer sells in this color, confirmed on
-    real data, see MS-T61008800T-ROSEQUARTZ-54); warning is a human-readable
-    summary or None. An unmatched offer_id's stock is never guessed or changed."""
+    """Re-fetches one M&S product page and returns (updates, unmatched,
+    wrong_url, warning): updates is [{offer_id, stock}, ...] for every
+    offer_id whose size AND identity match a variant on the page; unmatched
+    is offer_ids whose identity matches but whose specific size doesn't
+    appear on the page (a real discrepancy worth investigating — e.g. a size
+    Ozon still lists that M&S no longer sells in this color, confirmed on
+    real data, see MS-T61008800T-ROSEQUARTZ-54); wrong_url is offer_ids whose
+    embedded article code/SKU does NOT match this page at all — the URL
+    mapping entry for that offer_id is wrong and needs correcting, not
+    something to silently skip; warning is a human-readable summary or None.
+    Stock is never guessed or changed for anything in unmatched or wrong_url."""
     try:
         variant_rows = extract_product(url)
     except Exception as e:
-        return [], list(offer_ids_for_url), f"fetch error: {e}"
+        return [], list(offer_ids_for_url), [], f"fetch error: {e}"
 
     if not variant_rows:
-        return [], list(offer_ids_for_url), "no product data found on page"
+        return [], list(offer_ids_for_url), [], "no product data found on page"
+
+    page_article_code = variant_rows[0].get("ms_article_code")
+    page_parent_sku = variant_rows[0].get("parent_sku")
+
+    verified_offer_ids, wrong_url = [], []
+    for offer_id in offer_ids_for_url:
+        if verify_url_matches_offer_id(offer_id, page_article_code, page_parent_sku):
+            verified_offer_ids.append(offer_id)
+        else:
+            wrong_url.append(offer_id)
+
+    if not verified_offer_ids:
+        return [], [], wrong_url, (
+            f"URL does not match ANY of the {len(offer_ids_for_url)} offer_id(s) mapped to it "
+            f"(page is article {page_article_code!r} / SKU {page_parent_sku!r}) — mapping entry needs correcting."
+        )
+
+    offer_ids_for_url = verified_offer_ids
 
     # Match each fresh page variant to an offer_id by its size token. This can't
     # assume the offer_id's trailing token was built via ozon_mapping's UK->RU
@@ -177,8 +223,16 @@ def build_stock_updates_for_url(url, offer_ids_for_url):
         else:
             unmatched.append(offer_id)
 
-    warning = f"{len(unmatched)} offer_id(s) had no matching size on the fresh page" if unmatched else None
-    return updates, unmatched, warning
+    warnings = []
+    if unmatched:
+        warnings.append(f"{len(unmatched)} offer_id(s) had no matching size on the fresh page")
+    if wrong_url:
+        warnings.append(
+            f"{len(wrong_url)} offer_id(s) mapped to this URL do NOT belong to it "
+            f"(page is article {page_article_code!r} / SKU {page_parent_sku!r}) — mapping entry needs correcting"
+        )
+    warning = "; ".join(warnings) if warnings else None
+    return updates, unmatched, wrong_url, warning
 
 
 def push_stock_updates(updates):
@@ -253,25 +307,41 @@ def main():
 
     all_updates = []
     all_unmatched = []
+    all_wrong_url = []
     fetch_failures = 0
     for i, (url, offer_ids) in enumerate(offer_ids_by_url.items(), 1):
         print(f"[{i}/{len(offer_ids_by_url)}] {url} ({len(offer_ids)} offer_id(s))")
-        updates, unmatched, warning = build_stock_updates_for_url(url, offer_ids)
+        updates, unmatched, wrong_url, warning = build_stock_updates_for_url(url, offer_ids)
         if warning:
-            print(f"  ! {warning}: {unmatched}")
-            with open(REFETCH_LOG, "a", encoding="utf-8") as f:
-                import json
-                f.write(json.dumps({
-                    "url": url, "offer_ids": offer_ids, "warning": warning,
-                    "unmatched_offer_ids": unmatched,
-                }, ensure_ascii=False) + "\n")
+            print(f"  ! {warning}")
+            import json
+            if unmatched or wrong_url:
+                with open(REFETCH_LOG, "a", encoding="utf-8") as f:
+                    f.write(json.dumps({
+                        "url": url, "offer_ids": offer_ids, "warning": warning,
+                        "unmatched_offer_ids": unmatched,
+                    }, ensure_ascii=False) + "\n")
+            if wrong_url:
+                with open(WRONG_URL_LOG, "a", encoding="utf-8") as f:
+                    f.write(json.dumps({
+                        "url": url, "wrong_offer_ids": wrong_url,
+                    }, ensure_ascii=False) + "\n")
         if not updates and warning and "fetch error" in warning:
             fetch_failures += 1
         all_updates.extend(updates)
         all_unmatched.extend(unmatched)
+        all_wrong_url.extend(wrong_url)
         time.sleep(1.2)  # be polite to M&S, same pacing as crawler.py
 
     print(f"\n{len(all_updates)} stock update(s) ready to push ({fetch_failures} page(s) failed to fetch entirely).\n")
+
+    if all_wrong_url:
+        print(f"{len(all_wrong_url)} offer_id(s) are mapped to a URL that does NOT belong to them — "
+              f"their stock was left untouched. This means legacy_product_urls.csv (or the crawl-derived "
+              f"mapping) has a wrong entry for these. Full list in {WRONG_URL_LOG}.\n")
+        with open(WRONG_URL_SUMMARY_FILE, "w", encoding="utf-8") as f:
+            for oid in sorted(set(all_wrong_url)):
+                f.write(oid + "\n")
 
     if all_unmatched:
         print(f"{len(all_unmatched)} live offer_id(s) had NO matching size on their M&S page today — "

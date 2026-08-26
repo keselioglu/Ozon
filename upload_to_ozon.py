@@ -7,7 +7,6 @@ even though this runs fully automatically without pausing for confirmation.
 """
 import json
 import os
-import re
 import sys
 import time
 
@@ -20,8 +19,8 @@ if sys.platform == "win32":
 from ozon_client import call
 from ozon_mapping import (
     ATTR_BRAND, ATTR_COLOR, ATTR_GENDER, ATTR_SIZE, BRAND_MARKS_AND_SPENCER_ID,
-    GENDER_FEMALE_ID, log_mapping_decision, map_color_to_ozon, map_size_to_eu,
-    map_size_to_ozon, resolve_category_and_type,
+    GENDER_FEMALE_ID, extract_article_code_from_offer_id, log_mapping_decision,
+    map_color_to_ozon, map_size_to_eu, map_size_to_ozon, resolve_category_and_type,
 )
 from ozon_translations import BRAND_PREFIX, COLLECTION_ID, WARRANTY_ID, get_translation
 
@@ -42,17 +41,6 @@ DEFERRED_LOG = "deferred_items.json"
 
 TRY_TO_USD_RATE = 0.083
 MERGE_ATTR_ID = 8292  # "Merge on One PDP" — grouping key so size/color variants share one product page
-
-# The account carries this M&S product line under several different offer_id
-# conventions from past manual uploads (MAR-, MARKS-, SML-MAR-, SMLMS- observed
-# live — confirmed 2026-08-25: 471 rows already duplicated under MS- for a
-# product line already live under MAR-, sometimes with only the color name
-# translated differently, e.g. MS-T61002005X-ROSEQUARTZ vs MAR-T61002005X-KUVARS
-# for the same "rose quartz" color in Turkish). Rather than track every prefix
-# by name, this matches the M&S article code pattern itself (e.g. T81006849L,
-# T61002030X) wherever it appears in an offer_id, so a new naming convention
-# doesn't silently slip past this check the way MAR- originally did.
-MS_ARTICLE_CODE_IN_OFFER_ID_RE = re.compile(r"T\d{5,9}[A-Z]{0,2}")
 
 # Package weight/dims are not provided by M&S's page; these are reasonable estimates
 # for folded underwear in a poly bag, scaled by pack count. Spot-check after first listing.
@@ -227,10 +215,10 @@ def find_existing_offer_ids(offer_ids):
 def fetch_live_article_codes_by_prefix():
     """Scans EVERY live offer_id on the account (not just our own MS- ones) and
     returns {article_code: set_of_offer_id_prefixes_it_appears_under}, using
-    MS_ARTICLE_CODE_IN_OFFER_ID_RE to find the M&S article code wherever it's
-    embedded, regardless of naming convention. Used to skip creating a new
-    MS- listing for a product already sold under a different prefix (MAR-,
-    SML-MAR-, SMLMS-, etc.) — see the comment on MS_ARTICLE_CODE_IN_OFFER_ID_RE."""
+    extract_article_code_from_offer_id to find the M&S article code wherever
+    it's embedded, regardless of naming convention. Used to skip creating a
+    new MS- listing for a product already sold under a different prefix
+    (MAR-, SML-MAR-, SMLMS-, etc.)."""
     codes_to_prefixes = {}
     cursor = ""
     while True:
@@ -242,9 +230,8 @@ def fetch_live_article_codes_by_prefix():
         items = page.get("items", [])
         for item in items:
             oid = item.get("offer_id", "")
-            m = MS_ARTICLE_CODE_IN_OFFER_ID_RE.search(oid)
-            if m:
-                code = m.group(0)
+            code = extract_article_code_from_offer_id(oid)
+            if code:
                 prefix = oid.split("-", 1)[0]
                 codes_to_prefixes.setdefault(code, set()).add(prefix)
         cursor = page.get("last_id")
