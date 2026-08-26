@@ -40,28 +40,32 @@ UK_TO_RU_SIZE = {
 # This is the number embedded in every offer_id on this account, confirmed
 # against live legacy listings (MAR-, SML-, MARKS-, MARK- all use this, not
 # the UK->RU value) — see build_sku() in upload_to_ozon.py. Business-confirmed
-# chart (2026-08-26): UK 6/8/10/12/14/16/18/20/22 -> EU 34/36/38/40/42/44/46/48/50.
-# Ozon's own size dictionary also has entries beyond UK 22 (24/26/28); those
-# aren't in the business's chart, so are extrapolated by continuing the same
-# +2 EU-per-UK-size-step pattern the chart itself follows.
+# chart (2026-08-26): UK 6/8/10/12/14/16/18/20/22 -> EU 34/36/38/40/42/44/46/48/50,
+# and separately UK 24 -> EU 52 -> RU 58 (confirmed via the 5XL row below).
+# UK 26/28 (EU 54/56) remain an extrapolation of the chart's own +2-per-step
+# pattern, not yet independently confirmed by the business.
 UK_TO_EU_SIZE = {
     "6": "34", "8": "36", "10": "38", "12": "40", "14": "42",
     "16": "44", "18": "46", "20": "48", "22": "50", "24": "52", "26": "54", "28": "56",
 }
 
 # Letter size -> RU size, per the business's confirmed chart (2026-08-26):
-# XXS/XS/S/M/L/XL/XXL/3XL/4XL -> EU 34/36/38/40/42/44/46/48/50 -> RUS 40/42/44/46/48/50/52/54/56.
-# This is the RU ATTRIBUTE value only — see LETTER_TO_EU_SIZE for the offer_id number.
+# XXS/XS/S/M/L/XL/XXL/3XL/4XL/5XL -> EU 34/36/38/40/42/44/46/48/50/52
+# -> RUS 40/42/44/46/48/50/52/54/56/58. This is the RU ATTRIBUTE value only —
+# see LETTER_TO_EU_SIZE for the offer_id number. Confirmed: EU 58 (seen on
+# some live offer_ids) is NOT part of this chart — those are stale/discontinued
+# sizes, handled by archiving rather than a size mapping (see
+# archive_by_offer_id_pattern.py / conversation history, 2026-08-26).
 LETTER_TO_RU_SIZE = {
     "XXS": "40", "XS": "42", "S": "44", "M": "46", "L": "48",
-    "XL": "50", "XXL": "52", "3XL": "54", "4XL": "56",
+    "XL": "50", "XXL": "52", "3XL": "54", "4XL": "56", "5XL": "58",
 }
 
 # Letter size -> EU size (the number shown on M&S's page / embedded in offer_ids),
 # per the same business-confirmed chart.
 LETTER_TO_EU_SIZE = {
     "XXS": "34", "XS": "36", "S": "38", "M": "40", "L": "42",
-    "XL": "44", "XXL": "46", "3XL": "48", "4XL": "50",
+    "XL": "44", "XXL": "46", "3XL": "48", "4XL": "50", "5XL": "52",
 }
 
 # Manual overrides for M&S color names that don't have a clean automatic match
@@ -117,7 +121,7 @@ def extract_letter_size(size_label):
     if not size_label:
         return None
     import re
-    m = re.search(r"UK\s*(XXS|XXL|XS|S|M|L|XL|3XL|4XL)\b", size_label)
+    m = re.search(r"UK\s*(XXS|XXL|XS|S|M|L|XL|3XL|4XL|5XL)\b", size_label)
     return m.group(1) if m else None
 
 
