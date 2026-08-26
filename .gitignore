@@ -16,6 +16,7 @@ category_tree_clothing.txt
 category_tree_top.txt
 colors_dictionary.txt
 daily_run_*.log
+generated_photos/
 __pycache__/
 *.pyc
 .venv/

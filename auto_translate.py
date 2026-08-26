@@ -14,6 +14,9 @@ import re
 import sys
 
 import anthropic
+from dotenv import load_dotenv
+
+load_dotenv()
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -69,46 +72,52 @@ on the cut described in the source name, or null if the cut isn't specified.
 clearly implies different care (e.g. hand-wash-only for lace), matching this house style: \
 "Машинная стирка при 30°C. Не отбеливать. Сушить при низкой температуре." (or the hand-wash variant for delicate \
 lace pieces, matching the T81006849L example).
-- "hashtags" should follow the exact format of the examples: 4-5 lowercase Russian hashtags plus the fixed final \
-tag #MarksSpencer, space-separated, each starting with #, no spaces within a tag.
-- Match the tone, sentence structure, and length of the examples closely — two short sentences: one describing \
-the garment/fit/fabric, one describing the finish or comfort quality.
+- "hashtags" must be EXACTLY 5 lowercase Russian hashtags, space-separated, each starting with #, no spaces \
+within a tag. Do NOT include the brand name in any tag (no "MarksSpencer", no "marks", no "spencer" in any form). \
+Each tag should be a term a real buyer would plausibly search for: garment type, material, fit/cut, style \
+features, or a broader category term (e.g. женское белье) — based only on facts already in the name/specs given, \
+never invented.
+- "description" must END with the same 5 hashtags from "hashtags", appended after the descriptive sentences, \
+space-separated in the same format. The description (including the appended hashtags) must stay under 500 \
+characters total — trim the descriptive text if needed so the hashtags always fit, never truncate the hashtags.
+- Match the tone, sentence structure, and length of the examples closely — two short descriptive sentences before \
+the hashtags: one describing the garment/fit/fabric, one describing the finish or comfort quality.
 
 Respond with ONLY the JSON object, no other text."""
 
 FEW_SHOT_EXAMPLES = """Example 1 (underwear, high-leg cut, lace, synthetic — no material_id match):
 {
   "name": "Розали трусы с высоким вырезом на ноге",
-  "description": "Женские трусы с высоким вырезом на ноге и кружевной отделкой. Синтетический материал, элегантный крой, мягкая посадка по фигуре.",
+  "description": "Женские трусы с высоким вырезом на ноге и кружевной отделкой. Синтетический материал, элегантный крой, мягкая посадка по фигуре. #трусы #женскоебелье #кружевныетрусы #высокаяпосадка #трусыcкружевом",
   "material_id": null,
   "material_text": "Синтетика",
   "material_composition": "Состав: синтетика, кружевная отделка",
   "planting_type_id": 45007,
   "care_text": "Ручная стирка при низкой температуре. Не отбеливать. Не сушить в стиральной машине.",
-  "hashtags": "#трусы #женскоебелье #кружевныетрусы #высокаяпосадка #MarksSpencer"
+  "hashtags": "#трусы #женскоебелье #кружевныетрусы #высокаяпосадка #трусыcкружевом"
 }
 
 Example 2 (underwear set, medium cut, cotton):
 {
   "name": "Комплект из 5 трусов Бразилиана с кружевной отделкой",
-  "description": "Комплект из 5 пар женских трусов бразилиана из хлопкового трикотажа с кружевным принтом. Дышащий материал, средняя посадка, мягкая эластичная резинка.",
+  "description": "Комплект из 5 пар женских трусов бразилиана из хлопкового трикотажа с кружевным принтом. Дышащий материал, средняя посадка, мягкая эластичная резинка. #трусы #женскоебелье #бразилиана #хлопковоебелье #трусыхлопок",
   "material_id": 62174,
   "material_text": "Хлопок",
   "material_composition": "Состав: хлопок, эластан",
   "planting_type_id": 45009,
   "care_text": "Машинная стирка при 30°C. Не отбеливать. Сушить при низкой температуре.",
-  "hashtags": "#трусы #женскоебелье #бразилиана #хлопковоебелье #MarksSpencer"
+  "hashtags": "#трусы #женскоебелье #бразилиана #хлопковоебелье #трусыхлопок"
 }
 
 Example 3 (tank top, modal — no planting_type_id, not underwear):
 {
   "name": "Комплект из 2 маек Flexifit™ без рукавов",
-  "description": "Комплект из 2 женских маек без рукавов из мягкого модалового трикотажа. Однотонная расцветка, эластичная посадка без сдавливания.",
+  "description": "Комплект из 2 женских маек без рукавов из мягкого модалового трикотажа. Однотонная расцветка, эластичная посадка без сдавливания. #майка #женскоебелье #модал #безрукавов #домашняяодежда",
   "material_id": 61952,
   "material_text": "Модал",
   "material_composition": "Состав: модал, эластан",
   "care_text": "Машинная стирка при 30°C. Не отбеливать. Сушить при низкой температуре.",
-  "hashtags": "#майка #женскоебелье #модал #безрукавов #MarksSpencer"
+  "hashtags": "#майка #женскоебелье #модал #безрукавов #домашняяодежда"
 }"""
 
 OUTPUT_SCHEMA = {
@@ -132,12 +141,33 @@ OUTPUT_SCHEMA = {
 
 _LATIN_RE = re.compile(r"[A-Za-z]")
 _ALLOWED_LATIN_TOKENS = re.compile(r"MarksSpencer|™")
+_BRAND_WORDS_RE = re.compile(r"marks|spencer|марк|спенсер", re.IGNORECASE)
 
 
 def _has_disallowed_latin(text):
     """True if text contains Latin letters outside the allowed brand/trademark tokens."""
     stripped = _ALLOWED_LATIN_TOKENS.sub("", text)
     return bool(_LATIN_RE.search(stripped))
+
+
+def _validate_hashtags(hashtags):
+    """Raises ValueError if hashtags aren't exactly 5 well-formed, brand-free,
+    fully-Cyrillic tags (business instruction, 2026-08-26: hashtags exclude
+    the brand name and cover 5 potential buyer searches). Confirmed on real
+    output from fix_hashtags.py: the model occasionally slips a single Latin
+    lookalike letter into an otherwise-Cyrillic word (e.g. "kружевом" with a
+    Latin k) — a real Ozon content-policy violation a brand/count check alone
+    wouldn't catch."""
+    tags = hashtags.split()
+    if len(tags) != 5:
+        raise ValueError(f"expected exactly 5 hashtags, got {len(tags)}: {hashtags!r}")
+    for tag in tags:
+        if not tag.startswith("#"):
+            raise ValueError(f"hashtag {tag!r} does not start with #")
+        if _BRAND_WORDS_RE.search(tag):
+            raise ValueError(f"hashtag {tag!r} contains a brand reference — not allowed")
+        if _LATIN_RE.search(tag):
+            raise ValueError(f"hashtag {tag!r} contains a Latin character — not allowed")
 
 
 def _validate_translation(entry, is_underwear):
@@ -168,6 +198,15 @@ def _validate_translation(entry, is_underwear):
         valid = {PLANTING_TYPE_HIGH, PLANTING_TYPE_MEDIUM, PLANTING_TYPE_LOW}
         if entry["planting_type_id"] not in valid:
             raise ValueError(f"planting_type_id {entry['planting_type_id']!r} is not a known verified value")
+
+    _validate_hashtags(entry["hashtags"])
+    if not entry["description"].rstrip().endswith(entry["hashtags"]):
+        raise ValueError(
+            f"description does not end with the hashtags (business instruction: hashtags must appear "
+            f"in the description too): description={entry['description']!r} hashtags={entry['hashtags']!r}"
+        )
+    if len(entry["description"]) > 500:
+        raise ValueError(f"description with hashtags is {len(entry['description'])} chars, over the 500 cap")
 
 
 def generate_translation(article_code, name, specs_json, client=None):

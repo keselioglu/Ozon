@@ -3,3 +3,4 @@ pandas>=2.2.0
 requests>=2.32.0
 python-dotenv>=1.0.1
 anthropic>=0.68.0
+Pillow>=10.0.0
