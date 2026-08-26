@@ -25,8 +25,18 @@ Source of URLs, in priority order:
      — this source only ever applies to our own MS- uploads, since only those
      rows carry a recorded crawl URL.
 
-Live offer_ids with no URL in either source are left untouched — not
-modified, not reported as broken.
+Live offer_ids with no URL in either source at all are left completely
+untouched — not modified, not reported as broken (nothing to check them
+against). Two other discrepancy cases DO get a stock value written, but it's
+always 0 rather than a real re-fetched number, since there's no reliable
+source for their actual stock (business decision, 2026-08-26):
+
+  - "wrong URL": the offer_id's mapped URL is verified (via article code/SKU
+    — see verify_url_matches_offer_id) to belong to a DIFFERENT product. The
+    mapping data itself is wrong and needs correcting — logged separately so
+    it's actionable, not just silently zeroed.
+  - "unmatched": the page is confirmed correct, but this specific size no
+    longer appears on it — treated as effectively sold out.
 """
 import sys
 import time
@@ -154,22 +164,32 @@ def verify_url_matches_offer_id(offer_id, page_article_code, page_parent_sku):
 def build_stock_updates_for_url(url, offer_ids_for_url):
     """Re-fetches one M&S product page and returns (updates, unmatched,
     wrong_url, warning): updates is [{offer_id, stock}, ...] for every
-    offer_id whose size AND identity match a variant on the page; unmatched
-    is offer_ids whose identity matches but whose specific size doesn't
-    appear on the page (a real discrepancy worth investigating — e.g. a size
-    Ozon still lists that M&S no longer sells in this color, confirmed on
-    real data, see MS-T61008800T-ROSEQUARTZ-54); wrong_url is offer_ids whose
-    embedded article code/SKU does NOT match this page at all — the URL
-    mapping entry for that offer_id is wrong and needs correcting, not
-    something to silently skip; warning is a human-readable summary or None.
-    Stock is never guessed or changed for anything in unmatched or wrong_url."""
+    offer_id in offer_ids_for_url — always, since both discrepancy cases
+    below still get a stock value (0), just via a different path than a
+    real page match; unmatched and wrong_url are reported alongside for
+    visibility even though their offer_ids are also present in updates.
+
+    unmatched = identity matches but the specific size doesn't appear on the
+    page (e.g. a size Ozon still lists that M&S no longer sells in this
+    color, confirmed on real data, see MS-T61008800T-ROSEQUARTZ-54).
+    wrong_url = the offer_id's embedded article code/SKU does NOT match this
+    page at all — the URL mapping entry itself is wrong and needs correcting.
+
+    Business decision (2026-08-26): for both cases there's no reliable stock
+    source for that offer_id right now, so it's set to 0 (treated as sold
+    out) rather than left at a possibly-stale prior value. The distinction
+    still matters operationally: unmatched is usually a discontinued size,
+    wrong_url means the mapping data itself needs fixing — hence both stay
+    separately logged even though the resulting stock action is the same."""
     try:
         variant_rows = extract_product(url)
     except Exception as e:
-        return [], list(offer_ids_for_url), [], f"fetch error: {e}"
+        zeroed = [{"offer_id": oid, "stock": 0} for oid in offer_ids_for_url]
+        return zeroed, list(offer_ids_for_url), [], f"fetch error: {e}"
 
     if not variant_rows:
-        return [], list(offer_ids_for_url), [], "no product data found on page"
+        zeroed = [{"offer_id": oid, "stock": 0} for oid in offer_ids_for_url]
+        return zeroed, list(offer_ids_for_url), [], "no product data found on page"
 
     page_article_code = variant_rows[0].get("ms_article_code")
     page_parent_sku = variant_rows[0].get("parent_sku")
@@ -182,11 +202,13 @@ def build_stock_updates_for_url(url, offer_ids_for_url):
             wrong_url.append(offer_id)
 
     if not verified_offer_ids:
-        return [], [], wrong_url, (
+        zeroed = [{"offer_id": oid, "stock": 0} for oid in wrong_url]
+        return zeroed, [], wrong_url, (
             f"URL does not match ANY of the {len(offer_ids_for_url)} offer_id(s) mapped to it "
             f"(page is article {page_article_code!r} / SKU {page_parent_sku!r}) — mapping entry needs correcting."
         )
 
+    wrong_url_updates = [{"offer_id": oid, "stock": 0} for oid in wrong_url]
     offer_ids_for_url = verified_offer_ids
 
     # Match each fresh page variant to an offer_id by its size token. This can't
@@ -221,11 +243,19 @@ def build_stock_updates_for_url(url, offer_ids_for_url):
         elif size_token and size_token in fresh_by_size_token:
             updates.append({"offer_id": offer_id, "stock": fresh_by_size_token[size_token]})
         else:
+            # Right product (identity verified above), but this exact size
+            # doesn't appear on the page at all today — treated as sold out /
+            # discontinued rather than "unknown", so stock is zeroed rather
+            # than left at a possibly-stale prior value (business decision,
+            # 2026-08-26). Still logged as unmatched for visibility.
+            updates.append({"offer_id": offer_id, "stock": 0})
             unmatched.append(offer_id)
+
+    updates.extend(wrong_url_updates)
 
     warnings = []
     if unmatched:
-        warnings.append(f"{len(unmatched)} offer_id(s) had no matching size on the fresh page")
+        warnings.append(f"{len(unmatched)} offer_id(s) had no matching size on the fresh page — stock set to 0")
     if wrong_url:
         warnings.append(
             f"{len(wrong_url)} offer_id(s) mapped to this URL do NOT belong to it "
@@ -337,16 +367,19 @@ def main():
 
     if all_wrong_url:
         print(f"{len(all_wrong_url)} offer_id(s) are mapped to a URL that does NOT belong to them — "
-              f"their stock was left untouched. This means legacy_product_urls.csv (or the crawl-derived "
-              f"mapping) has a wrong entry for these. Full list in {WRONG_URL_LOG}.\n")
+              f"their stock was set to 0 (business decision: no reliable source for their real stock, so "
+              f"treat as sold out rather than leave a possibly-stale value). This means "
+              f"legacy_product_urls.csv (or the crawl-derived mapping) has a wrong entry for these — "
+              f"the mapping itself still needs correcting. Full list in {WRONG_URL_LOG}.\n")
         with open(WRONG_URL_SUMMARY_FILE, "w", encoding="utf-8") as f:
             for oid in sorted(set(all_wrong_url)):
                 f.write(oid + "\n")
 
     if all_unmatched:
         print(f"{len(all_unmatched)} live offer_id(s) had NO matching size on their M&S page today — "
-              f"their stock was left as-is (not guessed). This usually means the offer_id represents a "
-              f"size/color combination M&S no longer sells. Full list in {UNMATCHED_SUMMARY_FILE}.\n")
+              f"their stock was set to 0 (business decision: treat as sold out/discontinued rather than "
+              f"leaving a possibly-stale value). This usually means the offer_id represents a size/color "
+              f"combination M&S no longer sells. Full list in {UNMATCHED_SUMMARY_FILE}.\n")
         with open(UNMATCHED_SUMMARY_FILE, "w", encoding="utf-8") as f:
             for oid in sorted(set(all_unmatched)):
                 f.write(oid + "\n")
