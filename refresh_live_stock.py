@@ -37,10 +37,9 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-import re
-
 from crawler import extract_product
 from ozon_client import call
+from ozon_mapping import extract_eu_size, extract_letter_size
 from category_priority import fetch_live_ms_identifiers
 
 LEGACY_URL_MAP_FILE = "legacy_product_urls.csv"
@@ -159,13 +158,13 @@ def build_stock_updates_for_url(url, offer_ids_for_url):
         stock = v.get("stock_count")
         stock = stock if stock is not None else 0
 
-        eu_match = re.match(r"^(\d+)\s*\(", label)
-        letter_match = re.search(r"\b(XXL|XS|S|M|L|XL)\b", label)
+        eu_size = extract_eu_size(label)
+        letter_size = extract_letter_size(label)
 
-        if eu_match:
-            fresh_by_size_token[eu_match.group(1)] = stock
-        if letter_match:
-            fresh_by_size_token[letter_match.group(1)] = stock
+        if eu_size:
+            fresh_by_size_token[eu_size] = stock
+        if letter_size:
+            fresh_by_size_token[letter_size] = stock
 
     updates = []
     unmatched = []

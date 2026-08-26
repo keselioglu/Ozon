@@ -28,16 +28,40 @@ BRAND_MARKS_AND_SPENCER_ID = 971843743
 
 # UK -> RU women's underwear size, as given by the business (verified against
 # Ozon's live size dictionary — every RU value below has a matching entry).
+# This is used ONLY for the Ozon size ATTRIBUTE (the dictionary value shown to
+# buyers on the PDP) — never for the offer_id. See UK_TO_EU_SIZE below for that.
 UK_TO_RU_SIZE = {
     "6": "40", "8": "42", "10": "44", "12": "46", "14": "48",
     "16": "50", "18": "52", "20": "54", "22": "56", "24": "58", "26": "60", "28": "62",
 }
 
-# Letter size -> EU/RU size, per M&S's official top-garment size chart (2026-08-25),
-# using the LOWER bound of each letter's EU range (business decision — conservative,
-# avoids overstating size to the buyer). Verified against Ozon's live size dictionary.
+# UK -> EU women's size, the number M&S actually displays on its own page
+# (e.g. label "40 (UK 12)" — "40" is the EU number, "12" is the UK number).
+# This is the number embedded in every offer_id on this account, confirmed
+# against live legacy listings (MAR-, SML-, MARKS-, MARK- all use this, not
+# the UK->RU value) — see build_sku() in upload_to_ozon.py. Business-confirmed
+# chart (2026-08-26): UK 6/8/10/12/14/16/18/20/22 -> EU 34/36/38/40/42/44/46/48/50.
+# Ozon's own size dictionary also has entries beyond UK 22 (24/26/28); those
+# aren't in the business's chart, so are extrapolated by continuing the same
+# +2 EU-per-UK-size-step pattern the chart itself follows.
+UK_TO_EU_SIZE = {
+    "6": "34", "8": "36", "10": "38", "12": "40", "14": "42",
+    "16": "44", "18": "46", "20": "48", "22": "50", "24": "52", "26": "54", "28": "56",
+}
+
+# Letter size -> RU size, per the business's confirmed chart (2026-08-26):
+# XXS/XS/S/M/L/XL/XXL/3XL/4XL -> EU 34/36/38/40/42/44/46/48/50 -> RUS 40/42/44/46/48/50/52/54/56.
+# This is the RU ATTRIBUTE value only — see LETTER_TO_EU_SIZE for the offer_id number.
 LETTER_TO_RU_SIZE = {
-    "XS": "34", "S": "36", "M": "40", "L": "44", "XL": "48", "XXL": "52",
+    "XXS": "40", "XS": "42", "S": "44", "M": "46", "L": "48",
+    "XL": "50", "XXL": "52", "3XL": "54", "4XL": "56",
+}
+
+# Letter size -> EU size (the number shown on M&S's page / embedded in offer_ids),
+# per the same business-confirmed chart.
+LETTER_TO_EU_SIZE = {
+    "XXS": "34", "XS": "36", "S": "38", "M": "40", "L": "42",
+    "XL": "44", "XXL": "46", "3XL": "48", "4XL": "50",
 }
 
 # Manual overrides for M&S color names that don't have a clean automatic match
@@ -93,13 +117,29 @@ def extract_letter_size(size_label):
     if not size_label:
         return None
     import re
-    m = re.search(r"UK\s*(XXL|XS|S|M|L|XL)\b", size_label)
+    m = re.search(r"UK\s*(XXS|XXL|XS|S|M|L|XL|3XL|4XL)\b", size_label)
+    return m.group(1) if m else None
+
+
+def extract_eu_size(size_label):
+    """'40 (UK 12)' -> '40' — the EU number M&S displays directly on the page,
+    i.e. the leading number before the parenthesized UK size. Returns None if
+    the label has no leading number (observed on real data: M&S sometimes omits
+    it, e.g. label ' (UK 8)' with nothing before the space — a real gap on
+    M&S's own page, not a parsing bug; callers should treat None as "can't
+    resolve this size" rather than guessing)."""
+    if not size_label:
+        return None
+    import re
+    m = re.match(r"^\s*(\d+)\s*\(", size_label)
     return m.group(1) if m else None
 
 
 def map_size_to_ozon(size_label):
-    """Returns (dictionary_value_id, ru_size_str, warning_or_None). Handles both
-    numeric UK sizes ('34 (UK 6)') and letter sizes ('S (UK S)')."""
+    """Returns (dictionary_value_id, ru_size_str, warning_or_None) — the Ozon
+    size ATTRIBUTE value, shown to buyers on the PDP. Handles both numeric UK
+    sizes ('34 (UK 6)') and letter sizes ('S (UK S)'). NOT for building the
+    offer_id — see map_size_to_eu for that."""
     uk = extract_uk_size(size_label)
     ru_size = UK_TO_RU_SIZE.get(uk) if uk else None
 
@@ -115,6 +155,31 @@ def map_size_to_ozon(size_label):
         return None, ru_size, f"RU size {ru_size!r} not found in Ozon's live size dictionary"
 
     return value_id, ru_size, None
+
+
+def map_size_to_eu(size_label):
+    """Returns (eu_size_str, warning_or_None) — the EU number embedded in every
+    offer_id on this account (confirmed against live MAR-/SML-/MARKS-/MARK-
+    listings, e.g. 'UK 12' -> offer_id ends '-40', not the RU value '-46').
+    Tries the label's own leading EU number first (most direct and always
+    correct when present); falls back to the UK->EU or letter->EU chart only
+    when the label omits its leading number, matching the business's confirmed
+    size chart (2026-08-26)."""
+    eu_from_label = extract_eu_size(size_label)
+    if eu_from_label:
+        return eu_from_label, None
+
+    uk = extract_uk_size(size_label)
+    eu_size = UK_TO_EU_SIZE.get(uk) if uk else None
+    if eu_size:
+        return eu_size, None
+
+    letter = extract_letter_size(size_label)
+    eu_size = LETTER_TO_EU_SIZE.get(letter) if letter else None
+    if eu_size:
+        return eu_size, None
+
+    return None, f"Could not resolve an EU size from label {size_label!r}"
 
 
 def map_color_to_ozon(mands_color):

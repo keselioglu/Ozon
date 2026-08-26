@@ -53,14 +53,16 @@ def build_stock_updates(df):
         if pd.isna(article_code) or not article_code:
             continue
 
-        # Re-derive the RU size the same way build_ozon_item does, so offer_id matches
-        # exactly what was actually uploaded.
-        from ozon_mapping import map_size_to_ozon
-        _, ru_size, _ = map_size_to_ozon(row.get("size_label"))
-        if not ru_size:
+        # Re-derive the EU size the same way build_ozon_item does, so offer_id matches
+        # exactly what was actually uploaded. NOT map_size_to_ozon's ru_size — that's
+        # the Ozon size ATTRIBUTE value, a different number than what's embedded in
+        # the offer_id (see ozon_mapping.map_size_to_eu for why).
+        from ozon_mapping import map_size_to_eu
+        eu_size, _ = map_size_to_eu(row.get("size_label"))
+        if not eu_size:
             continue
 
-        offer_id = build_sku(article_code, row.get("color"), ru_size)
+        offer_id = build_sku(article_code, row.get("color"), eu_size)
 
         stock_count = row.get("stock_count")
         stock = int(stock_count) if pd.notna(stock_count) else FALLBACK_STOCK

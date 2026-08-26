@@ -20,8 +20,8 @@ if sys.platform == "win32":
 from ozon_client import call
 from ozon_mapping import (
     ATTR_BRAND, ATTR_COLOR, ATTR_GENDER, ATTR_SIZE, BRAND_MARKS_AND_SPENCER_ID,
-    GENDER_FEMALE_ID, log_mapping_decision, map_color_to_ozon, map_size_to_ozon,
-    resolve_category_and_type,
+    GENDER_FEMALE_ID, log_mapping_decision, map_color_to_ozon, map_size_to_eu,
+    map_size_to_ozon, resolve_category_and_type,
 )
 from ozon_translations import BRAND_PREFIX, COLLECTION_ID, WARRANTY_ID, get_translation
 
@@ -109,13 +109,24 @@ def build_ozon_item(row, offer_id_suffix=""):
         warnings.append(f"size: {size_warning}")
     log_mapping_decision(MAPPING_LOG, article_code, "size", row.get("size_label"), ru_size, size_warning)
 
+    # eu_size is the number embedded in the offer_id (matches every legacy
+    # listing on this account) — distinct from ru_size, which is the Ozon
+    # size ATTRIBUTE value shown on the PDP. Using ru_size for the offer_id
+    # was a real bug: it silently mislabeled every numeric-size product's SKU
+    # with the wrong physical size (e.g. UK 6 uploaded as offer_id "...-40",
+    # the EU number for UK 12 — confirmed on T61008800T, 2026-08-26).
+    eu_size, eu_size_warning = map_size_to_eu(row.get("size_label"))
+    if eu_size_warning:
+        warnings.append(f"eu_size: {eu_size_warning}")
+    log_mapping_decision(MAPPING_LOG, article_code, "eu_size", row.get("size_label"), eu_size, eu_size_warning)
+
     color_id, matched_color, color_warning = map_color_to_ozon(row.get("color"))
     if color_warning:
         warnings.append(f"color: {color_warning}")
     log_mapping_decision(MAPPING_LOG, article_code, "color", row.get("color"), matched_color, color_warning)
 
-    if not size_id or not color_id:
-        return None, warnings + ["Missing required size or color mapping — product not built."]
+    if not size_id or not color_id or not eu_size:
+        return None, warnings + ["Missing required size (RU attribute, EU offer_id number) or color mapping — product not built."]
 
     category_id, type_id = resolve_category_and_type(row.get("name"), is_multi_pack(row.get("name")))
     if not category_id:
@@ -132,7 +143,7 @@ def build_ozon_item(row, offer_id_suffix=""):
             "Add an entry to ozon_translations.py to include it."
         ]
 
-    sku = build_sku(article_code, row.get("color"), ru_size)
+    sku = build_sku(article_code, row.get("color"), eu_size)
 
     try_price = row.get("price")
     if pd.isna(try_price):
