@@ -37,6 +37,12 @@ source for their actual stock (business decision, 2026-08-26):
     it's actionable, not just silently zeroed.
   - "unmatched": the page is confirmed correct, but this specific size no
     longer appears on it — treated as effectively sold out.
+
+Stock is routed to the correct warehouse (regular vs. small-items) via
+warehouse_routing.py — see that module for the weight/price eligibility rule
+(business instruction, 2026-08-27). Routing is re-evaluated every run, not
+just once at upload, since a special-offer price change can move a product
+in or out of eligibility.
 """
 import sys
 import time
@@ -51,10 +57,10 @@ from crawler import extract_product
 from ozon_client import call
 from ozon_mapping import extract_article_code_from_offer_id, extract_eu_size, extract_letter_size
 from category_priority import fetch_live_ms_identifiers
+from warehouse_routing import build_routed_stock_updates
 
 LEGACY_URL_MAP_FILE = "legacy_product_urls.csv"
 PRODUCTS_CSV = "products.csv"
-WAREHOUSE_ID = 1020000320456000  # "Ozpark Bee Concept" — the account's only warehouse
 FALLBACK_STOCK = 20
 BATCH_SIZE = 100  # Ozon's max per /v2/products/stocks call
 REFETCH_LOG = "stock_refresh_skipped.jsonl"
@@ -265,36 +271,42 @@ def build_stock_updates_for_url(url, offer_ids_for_url):
     return updates, unmatched, wrong_url, warning
 
 
+def _key(entry):
+    """(offer_id, warehouse_id) — routing can produce two payload rows per
+    offer_id (target warehouse + zeroed other warehouse), so matching a
+    result back to its request must include warehouse_id, not offer_id alone."""
+    return (entry["offer_id"], entry["warehouse_id"])
+
+
 def push_stock_updates(updates):
     total_ok, total_failed = 0, 0
     retry_queue = []
     for i in range(0, len(updates), BATCH_SIZE):
         batch = updates[i:i + BATCH_SIZE]
-        payload_stocks = [{"offer_id": u["offer_id"], "stock": u["stock"], "warehouse_id": WAREHOUSE_ID} for u in batch]
         print(f"Updating batch {i // BATCH_SIZE + 1} ({len(batch)} items)...")
-        result = call("/v2/products/stocks", {"stocks": payload_stocks})
+        result = call("/v2/products/stocks", {"stocks": batch})
         for r in result.get("result", []):
+            key = (r["offer_id"], r["warehouse_id"])
             if r.get("updated"):
                 total_ok += 1
             elif any(e.get("code") == "TOO_MANY_REQUESTS" for e in r.get("errors", [])):
-                retry_queue.append(next(u for u in batch if u["offer_id"] == r["offer_id"]))
+                retry_queue.append(next(u for u in batch if _key(u) == key))
             else:
                 total_failed += 1
                 errors = "; ".join(e.get("message", str(e)) for e in r.get("errors", []))
-                print(f"  FAIL {r.get('offer_id')}: {errors}")
+                print(f"  FAIL {r.get('offer_id')} @ {r.get('warehouse_id')}: {errors}")
 
     if retry_queue:
         print(f"\n{len(retry_queue)} item(s) hit the per-offer rate limit — waiting 20s and retrying once...")
         time.sleep(20)
-        payload_stocks = [{"offer_id": u["offer_id"], "stock": u["stock"], "warehouse_id": WAREHOUSE_ID} for u in retry_queue]
-        result = call("/v2/products/stocks", {"stocks": payload_stocks})
+        result = call("/v2/products/stocks", {"stocks": retry_queue})
         for r in result.get("result", []):
             if r.get("updated"):
                 total_ok += 1
             else:
                 total_failed += 1
                 errors = "; ".join(e.get("message", str(e)) for e in r.get("errors", []))
-                print(f"  FAIL (after retry) {r.get('offer_id')}: {errors}")
+                print(f"  FAIL (after retry) {r.get('offer_id')} @ {r.get('warehouse_id')}: {errors}")
 
     return total_ok, total_failed
 
@@ -387,7 +399,15 @@ def main():
     if not all_updates:
         return print("Nothing to push.")
 
-    total_ok, total_failed = push_stock_updates(all_updates)
+    print("Deciding target warehouse per product (weight/price routing)...")
+    offer_id_to_stock = {u["offer_id"]: u["stock"] for u in all_updates}
+    routed_updates, routing_skipped = build_routed_stock_updates(offer_id_to_stock)
+    if routing_skipped:
+        print(f"{len(routing_skipped)} offer_id(s) skipped for routing (missing weight/price) — "
+              f"stock not pushed for these; existing warehouse assignment left as-is.")
+    print(f"{len(routed_updates)} warehouse-routed stock update(s) to push.\n")
+
+    total_ok, total_failed = push_stock_updates(routed_updates)
     print(f"\nDone. {total_ok} updated, {total_failed} failed, {unknown_count} skipped (no known URL).")
 
 
