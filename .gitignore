@@ -18,6 +18,7 @@ colors_dictionary.txt
 daily_run_*.log
 generated_photos/
 generated_size_charts/
+generated_videos/
 __pycache__/
 *.pyc
 .venv/
