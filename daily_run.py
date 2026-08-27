@@ -14,6 +14,8 @@ Scheduler once a day. Runs, in order:
   6. Sync stock for today's crawled/uploaded rows (update_stocks.py).
   7. Refresh stock for all live M&S-sourced Ozon products with a known source
      URL, whether or not this pipeline crawled them today (refresh_live_stock.py).
+  7b. Sweep any in-stock, eligible product into its active Ozon campaign(s)
+     (enroll_campaigns.py).
   8. Log to TASKS.md, commit & push.
 
 Each step is a subprocess call to the existing, already-working scripts. This
@@ -251,6 +253,17 @@ def main():
         done_line = next((l for l in live_stock_output.splitlines() if l.startswith("Done.")), "")
         counts["live_stock_summary"] = done_line
 
+    # 7b. Sweep any in-stock, eligible product into its active Ozon
+    # campaign(s) (enroll_campaigns.py, GitHub issue #10) -- runs after
+    # stock refresh so a product that just restocked is picked up the same
+    # day, not a day late. Not a hard failure either way.
+    ok, campaign_output = run_step("Campaign enrollment (enroll_campaigns.py)", ["enroll_campaigns.py"], timeout=1800)
+    if not ok:
+        attention.append("Campaign enrollment step failed — see log for details.")
+    elif "Done." in campaign_output:
+        done_line = next((l for l in campaign_output.splitlines() if l.startswith("Done.")), "")
+        counts["campaign_summary"] = done_line
+
     # 8. Update TASKS.md
     summary = (
         f"{TODAY}: {counts.get('discovery_summary', 'discovery status unknown')}, "
@@ -258,7 +271,8 @@ def main():
         f"({', '.join(counts['translated_codes']) if counts['translated_codes'] else 'none'}), "
         f"{counts.get('upload_totals', 'upload status unknown')}, "
         f"{counts.get('stock_summary', 'stock sync status unknown')}, "
-        f"{counts.get('live_stock_summary', 'live stock refresh status unknown')}"
+        f"{counts.get('live_stock_summary', 'live stock refresh status unknown')}, "
+        f"{counts.get('campaign_summary', 'campaign enrollment status unknown')}"
     )
     update_tasks_md(summary)
     git_commit_and_push(f"Daily run log: {TODAY}")
