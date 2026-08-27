@@ -21,6 +21,7 @@ only ever crops real source images.
 import os
 import subprocess
 import sys
+import time
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -120,9 +121,23 @@ def build_video_for_product(article_code, image_urls, output_dir):
         print(f"    ! ffmpeg failed: {result.stderr[-800:]}")
         return None, cover_path
 
-    # Clean up downloaded source frames -- only the final video/cover are needed.
+    # Clean up downloaded source frames -- only the final video/cover are
+    # needed. Windows can hold a brief file lock on an input right after
+    # ffmpeg's subprocess.run() returns (antivirus scan / delayed handle
+    # release), so a bare os.remove() here intermittently raises
+    # PermissionError even though the process has genuinely exited
+    # (confirmed live, 2026-08-27 -- crashed an entire catalog run after 15
+    # products). Retry briefly rather than let one locked file kill the run.
     for photo in local_photos:
-        os.remove(photo)
+        for attempt in range(5):
+            try:
+                os.remove(photo)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    print(f"    ! could not remove {photo} (still locked) -- leaving it in place")
+                else:
+                    time.sleep(0.5)
 
     return video_path, cover_path
 
@@ -145,9 +160,25 @@ def main():
         if not image_urls:
             continue
 
+        existing_video = os.path.join(OUTPUT_DIR, article_code, "video.mp4")
+        existing_cover = os.path.join(OUTPUT_DIR, article_code, "cover.jpg")
+        if os.path.exists(existing_video) and os.path.exists(existing_cover):
+            total += 1
+            ok += 1
+            continue
+
         total += 1
         print(f"{article_code}: building video from {min(len(image_urls), MAX_PHOTOS_PER_VIDEO)} photo(s)...")
-        video_path, cover_path = build_video_for_product(article_code, image_urls, OUTPUT_DIR)
+        try:
+            video_path, cover_path = build_video_for_product(article_code, image_urls, OUTPUT_DIR)
+        except Exception as e:
+            # One product's unexpected failure (ffmpeg crash, disk issue,
+            # etc.) must not kill the whole catalog run -- confirmed live
+            # (2026-08-27) that an unhandled PermissionError during cleanup
+            # took down an entire in-progress run after 15/175 products.
+            print(f"  ! unexpected error, skipping this product: {e}")
+            failed += 1
+            continue
         if video_path:
             ok += 1
             print(f"  -> {video_path}")
