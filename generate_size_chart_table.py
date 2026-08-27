@@ -1,19 +1,20 @@
 """
-Builds Ozon's "Таблица размеров JSON" (attribute 13164) per offer_id, using
-the real, confirmed schema exported from the Ozon Seller portal's own visual
-size-table constructor (business-supplied example, 2026-08-27, GitHub issue
-#6) -- NOT a guessed/community schema like the rich-content one:
+Builds Ozon's "Таблица размеров JSON" (attribute 13164) per CATEGORY, using
+the real schema confirmed from a live competitor listing's own Network-tab
+API response (business-supplied, 2026-08-27, GitHub issue #6):
 
     {
       "content": [
         {
           "widgetName": "tcTable",
           "table": {
-            "title": "...",
+            "title": "...",  <- must be RUSSIAN (first test used a Turkish
+                                 title, business flagged this as wrong)
             "body": [
-              {"data": [["RU", "Российский размер"], "42"]},
-              {"data": [["INT", "Международный размер"], "36"]},
-              {"data": [["Ог, см", "Обхват груди, см"], ""]},
+              {"data": [["RU", "Российский размер"], "40", "42", "44", ...]},
+              {"data": [["INT", "Международный размер"], "34", "36", "38", ...]},
+              {"data": [["От, см", "Объем талии, см"], "61", "65", "70", ...]},
+              {"data": [["Об, см", "Объем бедер, см"], "86", "90", "95", ...]},
               ...
             ]
           }
@@ -22,22 +23,22 @@ size-table constructor (business-supplied example, 2026-08-27, GitHub issue
       "version": 0.1
     }
 
-Each row is ONE measurement dimension for THIS SPECIFIC garment size (not a
-whole size-range table like the size-chart IMAGE in size_charts.py /
-generate_size_chart_images.py, issue #5) -- confirmed by the business
-example, which encodes a single RU 42 / INT 36 row. So unlike the image
-(one per category), the JSON table is one per (offer_id, its own size) --
-matching how Ozon actually presents it: a buyer viewing THIS listing sees
-just its own size's measurements, not a full chart.
+Each row's `data` is `[[short_label, long_label], value_for_col_1,
+value_for_col_2, ...]` -- one column per SIZE, so the whole chart's size
+range appears on every product in that category (business explicitly
+wanted "all sizes... seen in each product", not just the product's own
+size -- confirmed 2026-08-27 after the business viewed the first,
+single-size-only test and asked for this).
 
-Measurement values (chest/waist/hip in cm) come from size_charts.py's
-category tables, matched by this offer_id's own EU size within its
-category's row list. Left as "" when the category's chart doesn't have that
-particular measurement (e.g. socks have no chest/waist), matching the
-business example's own use of "" for unknown/inapplicable values.
+So THE SAME table (one per category) is pushed to every offer_id in that
+category -- it doesn't vary per product the way the per-product rich
+content does. size_charts.py's category tables are transposed here: each
+of its rows (one per size) becomes a column in the Ozon table; each of its
+measurement columns (Bel/Kalça/Göğüs/etc.) becomes one row.
 
-Not part of daily_run.py -- a one-time content build per product. Pushing
-live is a separate follow-up (this only builds and saves the JSON locally).
+Not part of daily_run.py -- a one-time content build. Pushing live is a
+separate follow-up (this only builds and saves the JSON locally, then
+associates it with every relevant offer_id).
 """
 import json
 import sys
@@ -48,18 +49,16 @@ if sys.platform == "win32":
 
 import pandas as pd
 
-from ozon_mapping import map_size_to_eu, map_size_to_ozon
 from size_charts import SIZE_CHARTS, classify_category
 
 PRODUCTS_CSV = "products.csv"
 OUTPUT_FILE = "generated_size_chart_tables.jsonl"
 SIZE_CHART_VERSION = 0.1
 
-# Maps a category's measurement columns (beyond Beden/İngiltere/Avrupa) to
-# the (short_label, long_label) pairs used in the business's own example --
-# Ог/Обхват груди (chest), От/Объем талии (waist), Об/Объем бедер (hip).
-# Column-name -> Russian label pairs, matched against size_charts.py's
-# "columns" lists so this stays correct if a category's columns change.
+# Maps a category's measurement columns to the (short_label, long_label)
+# pairs Ozon expects (Ог/Обхват груди = chest, От/Объем талии = waist,
+# Об/Объем бедер = hip) -- matched against size_charts.py's own "columns"
+# names so this stays correct if a category's columns ever change.
 MEASUREMENT_LABELS = {
     "Göğüs (cm)": ("Ог, см", "Обхват груди, см"),
     "Bel (cm)": ("От, см", "Объем талии, см"),
@@ -68,49 +67,38 @@ MEASUREMENT_LABELS = {
 }
 
 
-def find_row_for_eu_size(category_key, eu_size):
-    """category_key's row whose Avrupa (EU) column matches eu_size exactly,
-    or None if this category has no Avrupa column or no matching row (e.g.
-    the bra cup-conversion table has no EU size column at all)."""
-    chart = SIZE_CHARTS.get(category_key)
-    if not chart or "Avrupa" not in chart["columns"]:
-        return None
-    eu_index = chart["columns"].index("Avrupa")
-    for row in chart["rows"]:
-        if row[eu_index] == str(eu_size):
-            return chart, row
-    return None
+def build_category_size_table(category_key):
+    """One tcTable JSON for the whole category, with one column per size
+    (per size_charts.py's row list) and one row per measurement dimension
+    -- the transpose of how size_charts.py stores it (one row per size)."""
+    chart = SIZE_CHARTS[category_key]
+    columns = chart["columns"]
+    rows = chart["rows"]
 
+    body = []
 
-def build_size_table_json(category_key, eu_size, ru_size):
-    result = find_row_for_eu_size(category_key, eu_size)
-    body = [
-        {"data": [["RU", "Российский размер"], str(ru_size) if ru_size else ""]},
-        {"data": [["INT", "Международный размер"], str(eu_size) if eu_size else ""]},
-    ]
+    if "Beden" in columns:
+        beden_idx = columns.index("Beden")
+        body.append({"data": [["Размер", "Буквенный размер"], *[r[beden_idx] for r in rows]]})
 
-    if result:
-        chart, row = result
-        for col_name, label_pair in MEASUREMENT_LABELS.items():
-            if col_name in chart["columns"]:
-                idx = chart["columns"].index(col_name)
-                body.append({"data": [list(label_pair), row[idx]]})
-    else:
-        # Still include the three standard measurement rows (matching the
-        # business's own example shape) even when we have no data for them,
-        # using "" exactly as their example did for values not applicable.
-        for label_pair in MEASUREMENT_LABELS.values():
-            if label_pair not in [tuple(b["data"][0]) for b in body]:
-                body.append({"data": [list(label_pair), ""]})
+    if "İngiltere" in columns:
+        uk_idx = columns.index("İngiltere")
+        body.append({"data": [["UK", "Британский размер"], *[r[uk_idx] for r in rows]]})
 
-    chart_title = SIZE_CHARTS.get(category_key, {}).get("title", "Таблица размеров")
+    if "Avrupa" in columns:
+        eu_idx = columns.index("Avrupa")
+        body.append({"data": [["INT", "Международный размер"], *[r[eu_idx] for r in rows]]})
+
+    for col_name, label_pair in MEASUREMENT_LABELS.items():
+        if col_name in columns:
+            idx = columns.index(col_name)
+            body.append({"data": [list(label_pair), *[r[idx] for r in rows]]})
+
     return {
-        "content": [
-            {
-                "widgetName": "tcTable",
-                "table": {"title": chart_title, "body": body},
-            }
-        ],
+        "content": [{
+            "widgetName": "tcTable",
+            "table": {"title": chart.get("title_ru", chart["title"]), "body": body},
+        }],
         "version": SIZE_CHART_VERSION,
     }
 
@@ -122,6 +110,11 @@ def main():
         return print(f"{PRODUCTS_CSV} not found.")
 
     from upload_to_ozon import build_sku
+    from ozon_mapping import map_size_to_eu
+
+    # Build each category's table once (it's identical for every product in
+    # that category -- all sizes always shown), then reuse it.
+    category_tables = {key: build_category_size_table(key) for key in SIZE_CHARTS}
 
     built, skipped = 0, 0
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
@@ -131,27 +124,27 @@ def main():
                 continue
 
             category_key = classify_category(row.get("url"))
-            eu_size, _ = map_size_to_eu(row.get("size_label"))
-            _, ru_size, _ = map_size_to_ozon(row.get("size_label"))
-
-            if not eu_size and not ru_size:
+            if not category_key:
                 skipped += 1
                 continue
 
-            offer_id = build_sku(article_code, row.get("color"), eu_size or "")
-            size_table = build_size_table_json(category_key, eu_size, ru_size)
+            eu_size, _ = map_size_to_eu(row.get("size_label"))
+            if not eu_size:
+                skipped += 1
+                continue
 
+            offer_id = build_sku(article_code, row.get("color"), eu_size)
             f.write(json.dumps({
                 "offer_id": offer_id,
-                "size_table": size_table,
+                "size_table": category_tables[category_key],
             }, ensure_ascii=False) + "\n")
             built += 1
 
-    print(f"{built} size-chart table(s) built, {skipped} skipped (no resolvable size), "
-          f"saved to {OUTPUT_FILE}.")
+    print(f"{built} size-chart table(s) built ({len(category_tables)} distinct category table(s), "
+          f"reused across matching products), {skipped} skipped, saved to {OUTPUT_FILE}.")
     print("NOT pushed to Ozon yet -- recommend testing one payload against a single live "
-          "offer_id via /v3/product/import first, since this is the confirmed schema but "
-          "our own category-matching logic hasn't been tested live yet.")
+          "offer_id via /v3/product/import first to confirm it renders correctly (all sizes "
+          "visible, Russian title).")
 
 
 if __name__ == "__main__":

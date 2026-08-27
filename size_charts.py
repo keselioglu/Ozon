@@ -69,6 +69,7 @@ SIZE_CHARTS = {
         # women's underwear-family products (kulot, tanga, slip, hipster,
         # brazilian, bikini, body, jartiyer, sort, pijama, gecelik).
         "title": "KADIN KÜLOTLAR BEDEN TABLOSU",
+        "title_ru": "Таблица размеров: женское белье",
         "columns": ["Beden", "İngiltere", "Avrupa", "Bel (cm)", "Kalça (cm)"],
         "rows": [
             ["XS", "6", "34", "61", "86"],
@@ -86,6 +87,7 @@ SIZE_CHARTS = {
     "atlet": {
         # M&S's "Women's Tops" table -- used for atlet (tank top/undershirt).
         "title": "KADIN ÜST GİYİM BEDEN TABLOSU",
+        "title_ru": "Таблица размеров: верхняя одежда",
         "columns": ["Beden", "İngiltere", "Avrupa", "Göğüs (cm)", "Bel (cm)"],
         "rows": [
             ["XS", "6", "34", "78", "61"],
@@ -99,6 +101,7 @@ SIZE_CHARTS = {
     "termal": {
         # Thermal wear follows the same body-measurement logic as tops.
         "title": "TERMAL GİYİM BEDEN TABLOSU",
+        "title_ru": "Таблица размеров: термобелье",
         "columns": ["Beden", "İngiltere", "Avrupa", "Göğüs (cm)", "Bel (cm)"],
         "rows": [
             ["XS", "6", "34", "78", "61"],
@@ -115,6 +118,7 @@ SIZE_CHARTS = {
         # table here is the closest real M&S data available, since socks in
         # this catalog are the pantyhose/külotlu çorap style.
         "title": "KÜLOTLU ÇORAP BEDEN ÖLÇÜM TABLOSU",
+        "title_ru": "Таблица размеров: колготки",
         "columns": ["Beden", "Boy (cm)", "Etek Bedeni", "Basen (cm)"],
         "rows": [
             ["S", "150-164", "8-12", "86-100"],
@@ -129,6 +133,7 @@ SIZE_CHARTS = {
         # M&S's own cup/band conversion grid -- band size (cm) x cup letter
         # maps to a garment size (S/M/L/XL/XXL), not a direct measurement.
         "title": "SUTYEN KUP BEDEN TABLOSU",
+        "title_ru": "Таблица размеров: бюстгальтер",
         "columns": ["Bant (cm)", "A", "B", "C", "D", "DD", "E", "F", "G", "GG"],
         "rows": [
             ["65/30", "S", "S", "S", "S", "M", "M", "L", "L", "XL"],
@@ -145,6 +150,7 @@ SIZE_CHARTS = {
         # separate leggings-specific chart, and this catalog's "tayt"
         # products are the tights/pantyhose style.
         "title": "KÜLOTLU ÇORAP BEDEN ÖLÇÜM TABLOSU",
+        "title_ru": "Таблица размеров: колготки",
         "columns": ["Beden", "Boy (cm)", "Etek Bedeni", "Basen (cm)"],
         "rows": [
             ["S", "150-164", "8-12", "86-100"],
@@ -158,6 +164,7 @@ SIZE_CHARTS = {
     "erkek_ic_giyim": {
         # M&S's own "Men's Underwear" table.
         "title": "ERKEK İÇ GİYİM BEDEN TABLOSU",
+        "title_ru": "Таблица размеров: мужское белье",
         "columns": ["Beden", "Bel (cm)"],
         "rows": [
             ["XS", "71-75"],
