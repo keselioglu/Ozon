@@ -49,6 +49,7 @@ if sys.platform == "win32":
 
 import pandas as pd
 
+from ozon_mapping import map_size_to_ozon
 from size_charts import SIZE_CHARTS, classify_category
 
 PRODUCTS_CSV = "products.csv"
@@ -76,6 +77,21 @@ def build_category_size_table(category_key):
     rows = chart["rows"]
 
     body = []
+
+    # RU size must be the FIRST row (business feedback, 2026-08-27, after
+    # viewing a live competitor example with RU on top) -- derived from the
+    # UK size via the same mapping table build_ozon_item uses, so it always
+    # matches what's actually on the offer_id's own ATTR_SIZE attribute
+    # rather than a separately-guessed number.
+    if "İngiltere" in columns:
+        uk_idx = columns.index("İngiltere")
+        ru_sizes = []
+        for r in rows:
+            uk = r[uk_idx]
+            uk_first = uk.split("-")[0].strip()  # e.g. "8-10" -> "8"
+            _, ru_size, _ = map_size_to_ozon(f"{uk_first} (UK {uk_first})")
+            ru_sizes.append(ru_size or "")
+        body.append({"data": [["RU", "Российский размер"], *ru_sizes]})
 
     if "Beden" in columns:
         beden_idx = columns.index("Beden")
