@@ -5,6 +5,9 @@ Scheduler once a day. Runs, in order:
      category_priority.csv from priority 1, queuing any not-yet-live products
      from the first category that has some, into product_urls.txt.
   2. Crawl (crawler.py) — processes whatever's newly queued in product_urls.txt.
+  2b. Re-check pages behind previously zero-stock-skipped sizes
+     (recheck_stockouts.py), so a restocked size gets uploaded instead of
+     staying permanently skipped.
   3. Auto-translate new products.
   4. Upload.
   5. Verify.
@@ -181,6 +184,18 @@ def main():
         log("Crawl step failed — stopping run. Not proceeding to translate/upload with stale data.")
         _finalize_failed_run("Crawl step failed — see log for details.")
         return
+
+    # 2b. Re-check pages behind previously zero-stock-skipped sizes, so a
+    # restocked size gets uploaded on this run instead of staying permanently
+    # skipped (crawler.py never revisits an already-processed URL on its own
+    # -- see recheck_stockouts.py's docstring, GitHub issue #9). Not a hard
+    # failure -- upload still proceeds with whatever products.csv already has.
+    ok, recheck_output = run_step("Stockout re-check (recheck_stockouts.py)", ["recheck_stockouts.py"], timeout=3600)
+    if not ok:
+        attention.append("Stockout re-check step failed — see log for details.")
+    elif "now show real stock" in recheck_output:
+        restock_line = next((l for l in recheck_output.splitlines() if "now show real stock" in l), "")
+        counts["restock_summary"] = restock_line
 
     # 3. Auto-translate any new products
     ok, translate_output = run_step("Auto-translate (auto_translate.py)", ["auto_translate.py"], timeout=1800)
