@@ -79,6 +79,12 @@ def build_care_text(translation):
 
 
 def build_rich_content(translation, primary_image_url):
+    """raShowcase's "chess" type alternates image/text blocks at a
+    contained ~708x708 size (confirmed live, 2026-08-27, after an initial
+    version rendered full-page-width -- the widget expects 2+ blocks with
+    this exact size and a "reverse" flag per block, not a single block with
+    arbitrary width/height values, which is what caused the full-bleed
+    rendering business flagged)."""
     content = [
         {
             "widgetName": "raTextBlock",
@@ -91,6 +97,7 @@ def build_rich_content(translation, primary_image_url):
     ]
 
     if primary_image_url:
+        care_text = build_care_text(translation) or ""
         content.append({
             "widgetName": "raShowcase",
             "type": "chess",
@@ -100,10 +107,10 @@ def build_rich_content(translation, primary_image_url):
                         "src": primary_image_url,
                         "srcMobile": primary_image_url,
                         "alt": translation.get("name", ""),
-                        "width": 500,
-                        "height": 650,
-                        "widthMobile": 300,
-                        "heightMobile": 390,
+                        "width": 708,
+                        "height": 708,
+                        "widthMobile": 640,
+                        "heightMobile": 640,
                     },
                     "title": {"content": [translation.get("name", "")]},
                     "text": {
@@ -112,9 +119,30 @@ def build_rich_content(translation, primary_image_url):
                         "color": "color1",
                         "content": [build_overview_text(translation)],
                     },
-                }
+                    "reverse": False,
+                },
+                {
+                    "img": {
+                        "src": primary_image_url,
+                        "srcMobile": primary_image_url,
+                        "alt": translation.get("name", ""),
+                        "width": 708,
+                        "height": 708,
+                        "widthMobile": 640,
+                        "heightMobile": 640,
+                    },
+                    "title": {"content": ["Уход за изделием"]},
+                    "text": {
+                        "size": "size2",
+                        "align": "left",
+                        "color": "color1",
+                        "content": [care_text],
+                    },
+                    "reverse": True,
+                },
             ],
         })
+        return {"content": content, "version": RICH_CONTENT_VERSION}
 
     care_text = build_care_text(translation)
     if care_text:
