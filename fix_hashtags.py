@@ -1,12 +1,22 @@
 """
 One-off correction: rewrites every product's hashtags to drop the brand name
-and be 5 genuine search terms instead, then appends those hashtags into the
-product description too (business instruction, 2026-08-26).
+and be 5 genuine search terms instead (business instruction, 2026-08-26).
 
 Previously every entry in ozon_translations.py ended with the fixed tag
 "#MarksSpencer" and had only 4 content hashtags. Per instruction: hashtags
-should exclude brand name entirely and include 5 potential buyer searches
-per product; the same 5 tags should also appear in the description.
+should exclude the brand name entirely and cover 5 potential buyer searches
+per product.
+
+CORRECTION (2026-08-27): this script originally also appended the hashtags
+into the product description, per the same instruction. Ozon's own PDP
+validation rejects that — "the description contains keywords for search,
+transfer them to the Keywords field" — since hashtags belong only in the
+dedicated hashtags field. build_description_with_hashtags is kept below only
+for reference/rollback; main() no longer calls it, and generate_hashtags
+alone is what a re-run uses now. All 156 already-affected descriptions were
+reverted by hand (see conversation history, 2026-08-27) — this script does
+NOT re-apply that fix, since PRODUCT_TRANSLATIONS entries currently in the
+file no longer end with their hashtags and don't need touching again.
 
 Uses the Anthropic API (same model/pattern as auto_translate.py) to generate
 new hashtags per product from its existing Russian name/description/material
@@ -144,11 +154,12 @@ def main():
     updated, skipped, already_ok = [], [], []
     for article_code, entry in PRODUCT_TRANSLATIONS.items():
         # Re-runnable: skip entries that already pass validation (no brand
-        # reference, exactly 5 tags, no stray Latin) so a re-run after a
-        # partial failure (e.g. API credits ran out mid-run, 2026-08-26)
-        # only touches what still needs fixing, instead of regenerating
-        # already-correct hashtags with different (non-deterministic) output.
-        if validate_hashtags(entry["hashtags"]) is None and entry["description"].rstrip().endswith(entry["hashtags"]):
+        # reference, exactly 5 tags, no stray Latin, not duplicated into the
+        # description) so a re-run only touches what still needs fixing,
+        # instead of regenerating already-correct hashtags with different
+        # (non-deterministic) output.
+        if (validate_hashtags(entry["hashtags"]) is None
+                and not entry["description"].rstrip().endswith(entry["hashtags"])):
             already_ok.append(article_code)
             continue
 
@@ -157,8 +168,6 @@ def main():
             print(f"SKIP {article_code}: {error}")
             skipped.append((article_code, error))
             continue
-
-        new_description = build_description_with_hashtags(entry["description"], hashtags)
 
         old_hashtags_line = f'"hashtags": {json.dumps(entry["hashtags"], ensure_ascii=False)},'
         new_hashtags_line = f'"hashtags": {json.dumps(hashtags, ensure_ascii=False)},'
@@ -169,30 +178,18 @@ def main():
             skipped.append((article_code, "hashtags line not found verbatim"))
             continue
 
-        # Description isn't always a single-line string — the original 24
-        # hand-written entries use Python's implicit string concatenation
-        # across multiple lines: "description": (\n    "..." \n    "..." \n),
-        # while auto_translate.py-generated entries are single-line. Match
-        # the whole "description": <value>, field within THIS article's dict
-        # block (bounded by the next top-level '"<CODE>": {' or end of dict)
-        # rather than assuming either shape, so both are handled correctly.
-        block_start = content.index(f'"{article_code}": {{')
-        next_entry_match = re.search(r'\n {4}"[^"]+": \{', content[block_start + 1:])
-        block_end = block_start + 1 + next_entry_match.start() if next_entry_match else len(content)
-        block = content[block_start:block_end]
+        content = content.replace(old_hashtags_line, new_hashtags_line, 1)
 
-        description_field_re = re.compile(r'"description":\s*(".*?"|\(.*?\)),', re.DOTALL)
-        m = description_field_re.search(block)
-        if not m:
-            print(f"SKIP {article_code}: could not find a description field in this entry's block.")
-            skipped.append((article_code, "description field not found in block"))
-            continue
-
-        new_description_field = f'"description": {json.dumps(new_description, ensure_ascii=False)},'
-        new_block = block[:m.start()] + new_description_field + block[m.end():]
-        new_block = new_block.replace(old_hashtags_line, new_hashtags_line, 1)
-
-        content = content[:block_start] + new_block + content[block_end:]
+        # If this entry's description still has the hashtags appended (an
+        # already-fixed hashtags field with a stale description, e.g. from
+        # before the 2026-08-27 correction), strip them — description must
+        # never contain the hashtags, see module docstring.
+        if entry["description"].rstrip().endswith(entry["hashtags"]):
+            trimmed_description = entry["description"].rstrip()[: -len(entry["hashtags"])].rstrip()
+            old_description_line = f'"description": {json.dumps(entry["description"], ensure_ascii=False)},'
+            new_description_line = f'"description": {json.dumps(trimmed_description, ensure_ascii=False)},'
+            if old_description_line in content:
+                content = content.replace(old_description_line, new_description_line, 1)
 
         print(f"OK   {article_code}: {hashtags}")
         updated.append(article_code)

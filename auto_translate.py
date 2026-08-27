@@ -77,30 +77,30 @@ within a tag. Do NOT include the brand name in any tag (no "MarksSpencer", no "m
 Each tag should be a term a real buyer would plausibly search for: garment type, material, fit/cut, style \
 features, or a broader category term (e.g. женское белье) — based only on facts already in the name/specs given, \
 never invented.
-- "description" must END with the same 5 hashtags from "hashtags", appended after the descriptive sentences, \
-space-separated in the same format. The description (including the appended hashtags) must stay under 500 \
-characters total — trim the descriptive text if needed so the hashtags always fit, never truncate the hashtags.
-- Match the tone, sentence structure, and length of the examples closely — two short descriptive sentences before \
-the hashtags: one describing the garment/fit/fabric, one describing the finish or comfort quality.
+- "description" must NOT contain the hashtags or any other keyword list — Ozon's own PDP validation rejects a \
+description containing a "long list" of search keywords (confirmed live, 2026-08-27), since hashtags belong only \
+in the dedicated "hashtags" field. Keep "description" as pure descriptive prose only.
+- Match the tone, sentence structure, and length of the examples closely — two short sentences: one describing \
+the garment/fit/fabric, one describing the finish or comfort quality.
 
 Respond with ONLY the JSON object, no other text."""
 
 FEW_SHOT_EXAMPLES = """Example 1 (underwear, high-leg cut, lace, synthetic — no material_id match):
 {
   "name": "Розали трусы с высоким вырезом на ноге",
-  "description": "Женские трусы с высоким вырезом на ноге и кружевной отделкой. Синтетический материал, элегантный крой, мягкая посадка по фигуре. #трусы #женскоебелье #кружевныетрусы #высокаяпосадка #трусыcкружевом",
+  "description": "Женские трусы с высоким вырезом на ноге и кружевной отделкой. Синтетический материал, элегантный крой, мягкая посадка по фигуре.",
   "material_id": null,
   "material_text": "Синтетика",
   "material_composition": "Состав: синтетика, кружевная отделка",
   "planting_type_id": 45007,
   "care_text": "Ручная стирка при низкой температуре. Не отбеливать. Не сушить в стиральной машине.",
-  "hashtags": "#трусы #женскоебелье #кружевныетрусы #высокаяпосадка #трусыcкружевом"
+  "hashtags": "#трусы #женскоебелье #кружевныетрусы #высокаяпосадка #трусыскружевом"
 }
 
 Example 2 (underwear set, medium cut, cotton):
 {
   "name": "Комплект из 5 трусов Бразилиана с кружевной отделкой",
-  "description": "Комплект из 5 пар женских трусов бразилиана из хлопкового трикотажа с кружевным принтом. Дышащий материал, средняя посадка, мягкая эластичная резинка. #трусы #женскоебелье #бразилиана #хлопковоебелье #трусыхлопок",
+  "description": "Комплект из 5 пар женских трусов бразилиана из хлопкового трикотажа с кружевным принтом. Дышащий материал, средняя посадка, мягкая эластичная резинка.",
   "material_id": 62174,
   "material_text": "Хлопок",
   "material_composition": "Состав: хлопок, эластан",
@@ -112,7 +112,7 @@ Example 2 (underwear set, medium cut, cotton):
 Example 3 (tank top, modal — no planting_type_id, not underwear):
 {
   "name": "Комплект из 2 маек Flexifit™ без рукавов",
-  "description": "Комплект из 2 женских маек без рукавов из мягкого модалового трикотажа. Однотонная расцветка, эластичная посадка без сдавливания. #майка #женскоебелье #модал #безрукавов #домашняяодежда",
+  "description": "Комплект из 2 женских маек без рукавов из мягкого модалового трикотажа. Однотонная расцветка, эластичная посадка без сдавливания.",
   "material_id": 61952,
   "material_text": "Модал",
   "material_composition": "Состав: модал, эластан",
@@ -200,13 +200,16 @@ def _validate_translation(entry, is_underwear):
             raise ValueError(f"planting_type_id {entry['planting_type_id']!r} is not a known verified value")
 
     _validate_hashtags(entry["hashtags"])
-    if not entry["description"].rstrip().endswith(entry["hashtags"]):
+    # Ozon's own PDP validation rejects a description containing a keyword
+    # list (confirmed live, 2026-08-27) -- the hashtags must NOT also appear
+    # in the description, only in the dedicated hashtags field.
+    if entry["description"].rstrip().endswith(entry["hashtags"]):
         raise ValueError(
-            f"description does not end with the hashtags (business instruction: hashtags must appear "
-            f"in the description too): description={entry['description']!r} hashtags={entry['hashtags']!r}"
+            f"description ends with the hashtags — Ozon rejects this as a keyword list in the "
+            f"description (confirmed 2026-08-27): description={entry['description']!r}"
         )
     if len(entry["description"]) > 500:
-        raise ValueError(f"description with hashtags is {len(entry['description'])} chars, over the 500 cap")
+        raise ValueError(f"description is {len(entry['description'])} chars, over the 500 cap")
 
 
 def generate_translation(article_code, name, specs_json, client=None):
