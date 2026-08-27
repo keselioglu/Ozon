@@ -66,10 +66,15 @@ def center_crop_zoom(img, ratio):
 
 
 def generate_extra_photos_for_product(article_code, image_urls, output_dir):
-    """Downloads the product's real photos and generates zoom crops from them,
-    cycling through source photos and zoom ratios until TARGET_PHOTO_COUNT is
-    reached. Returns the list of generated local file paths (empty if the
-    product already has enough real photos, or has no photos to crop from)."""
+    """Downloads the product's real photos and generates ONE zoom crop per
+    source photo (business instruction, 2026-08-27: "not the zoom of same
+    photo use different photos to zoom" -- an earlier version cycled through
+    multiple zoom ratios on the SAME photo once the real-photo pool ran out,
+    which produced near-duplicate images for low-photo-count products).
+    Returns the list of generated local file paths -- may be SHORTER than
+    `needed` if the product doesn't have enough distinct real photos to
+    cover the gap; that's a hard ceiling now, not something to paper over by
+    reusing a photo at a different zoom depth."""
     real_count = len(image_urls)
     needed = TARGET_PHOTO_COUNT - real_count
     if needed <= 0 or not image_urls:
@@ -79,14 +84,13 @@ def generate_extra_photos_for_product(article_code, image_urls, output_dir):
     os.makedirs(product_dir, exist_ok=True)
 
     generated_paths = []
-    combo_index = 0
-    # Cycle through (source photo, zoom ratio) combinations until we've made
-    # enough — e.g. 3 real photos x 4 ratios covers up to 12 generated shots.
-    combos = [(url, ratio) for ratio in ZOOM_CROP_RATIOS for url in image_urls]
-
-    while len(generated_paths) < needed and combo_index < len(combos):
-        url, ratio = combos[combo_index]
-        combo_index += 1
+    # Each source photo is used for AT MOST one generated crop -- distinct
+    # photos are exhausted before we'd ever consider a second ratio on the
+    # same one, and since we cap at one-per-photo, no second ratio is used
+    # at all (also avoids near-duplicate crops of the same garment shot).
+    for url, ratio in zip(image_urls, ZOOM_CROP_RATIOS):
+        if len(generated_paths) >= needed:
+            break
         try:
             img = download_image(url)
         except Exception as e:
@@ -97,6 +101,10 @@ def generate_extra_photos_for_product(article_code, image_urls, output_dir):
         out_path = os.path.join(product_dir, f"zoom_{len(generated_paths) + 1}.jpg")
         zoomed.save(out_path, "JPEG", quality=90)
         generated_paths.append(out_path)
+
+    if len(generated_paths) < needed:
+        print(f"    ! only {len(generated_paths)}/{needed} crop(s) generated -- "
+              f"not enough distinct real photos ({real_count}) to reach {TARGET_PHOTO_COUNT} without reusing one.")
 
     return generated_paths
 
