@@ -299,14 +299,20 @@ def push_stock_updates(updates):
     if retry_queue:
         print(f"\n{len(retry_queue)} item(s) hit the per-offer rate limit — waiting 20s and retrying once...")
         time.sleep(20)
-        result = call("/v2/products/stocks", {"stocks": retry_queue})
-        for r in result.get("result", []):
-            if r.get("updated"):
-                total_ok += 1
-            else:
-                total_failed += 1
-                errors = "; ".join(e.get("message", str(e)) for e in r.get("errors", []))
-                print(f"  FAIL (after retry) {r.get('offer_id')} @ {r.get('warehouse_id')}: {errors}")
+        # /v2/products/stocks caps at 100 items per call -- batch the retry
+        # the same way as the initial pass (same bug/fix as update_stocks.py,
+        # confirmed live 2026-08-28: an unbatched retry queue over 100 items
+        # crashes the whole step with a 400 error).
+        for i in range(0, len(retry_queue), BATCH_SIZE):
+            batch = retry_queue[i:i + BATCH_SIZE]
+            result = call("/v2/products/stocks", {"stocks": batch})
+            for r in result.get("result", []):
+                if r.get("updated"):
+                    total_ok += 1
+                else:
+                    total_failed += 1
+                    errors = "; ".join(e.get("message", str(e)) for e in r.get("errors", []))
+                    print(f"  FAIL (after retry) {r.get('offer_id')} @ {r.get('warehouse_id')}: {errors}")
 
     return total_ok, total_failed
 

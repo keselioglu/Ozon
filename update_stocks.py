@@ -155,14 +155,24 @@ def main():
         print(f"\n{len(moderation_retry_queue)} item(s) still mid-moderation ('not created' yet) — "
               f"waiting 3 minutes and retrying once...")
         time.sleep(180)
-        result = call("/v2/products/stocks", {"stocks": moderation_retry_queue})
-        for r in result.get("result", []):
-            if r.get("updated"):
-                total_ok += 1
-            else:
-                total_failed += 1
-                error_text = "; ".join(e.get("message", str(e)) for e in r.get("errors", []))
-                print(f"  FAIL (after moderation retry) {r.get('offer_id')} @ {r.get('warehouse_id')}: {error_text}")
+        # /v2/products/stocks caps at 100 items per call -- the retry queue
+        # can exceed that on a day with many new uploads (confirmed live,
+        # 2026-08-28: 427 queued items crashed this call with a 400 "must
+        # contain between 1 and 100 items" error, aborting the ENTIRE stock
+        # sync step -- including every other already-batched update below
+        # this point never running -- which is why that day's newly
+        # uploaded products were left showing 0 stock instead of their real
+        # count).
+        for i in range(0, len(moderation_retry_queue), BATCH_SIZE):
+            batch = moderation_retry_queue[i:i + BATCH_SIZE]
+            result = call("/v2/products/stocks", {"stocks": batch})
+            for r in result.get("result", []):
+                if r.get("updated"):
+                    total_ok += 1
+                else:
+                    total_failed += 1
+                    error_text = "; ".join(e.get("message", str(e)) for e in r.get("errors", []))
+                    print(f"  FAIL (after moderation retry) {r.get('offer_id')} @ {r.get('warehouse_id')}: {error_text}")
 
     print(f"\nDone. {total_ok} updated, {total_failed} failed.")
 
