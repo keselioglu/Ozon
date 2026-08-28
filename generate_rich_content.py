@@ -159,36 +159,54 @@ def build_rich_content(translation, primary_image_url):
 
 
 def load_primary_images():
-    """article_code -> first real M&S photo URL, from products.csv (already
-    public on M&S's own CDN -- no hosting blocker for this specific image)."""
+    """(article_code, color) -> first real M&S photo URL for THAT color,
+    from products.csv. Keyed by color too -- NOT article code alone --
+    since an article with multiple colors has different real photos per
+    color; using one representative photo regardless of color would show
+    the wrong color's product in rich content on the other colors' PDPs
+    (same bug class confirmed live in generate_product_videos.py,
+    2026-08-28 -- a white product's video ended up pushed to a black
+    offer_id)."""
     try:
         df = pd.read_csv(PRODUCTS_CSV, encoding="utf-8-sig")
     except FileNotFoundError:
         return {}
     images = {}
-    for _, row in df.drop_duplicates("ms_article_code").iterrows():
+    for _, row in df.drop_duplicates(["ms_article_code", "color"]).iterrows():
         article_code = row.get("ms_article_code")
+        color = row.get("color")
         urls = str(row.get("image_urls") or "").split("|")
         urls = [u.strip() for u in urls if u.strip()]
         if article_code and urls:
-            images[article_code] = urls[0]
+            images[(article_code, color)] = urls[0]
     return images
 
 
 def main():
     primary_images = load_primary_images()
-    print(f"{len(primary_images)} article code(s) have a known primary M&S photo.\n")
+    print(f"{len(primary_images)} (article, color) pair(s) have a known primary M&S photo.\n")
+
+    # Group primary_images by article code so each (article, color) combo
+    # gets its own rich-content payload, keyed the same way offer_ids
+    # actually are (article + color), not article alone.
+    from collections import defaultdict
+    colors_by_article = defaultdict(list)
+    for (article_code, color) in primary_images:
+        colors_by_article[article_code].append(color)
 
     built = 0
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         for article_code, translation in PRODUCT_TRANSLATIONS.items():
-            image_url = primary_images.get(article_code)
-            rich_content = build_rich_content(translation, image_url)
-            f.write(json.dumps({
-                "article_code": article_code,
-                "rich_content": rich_content,
-            }, ensure_ascii=False) + "\n")
-            built += 1
+            colors = colors_by_article.get(article_code, [None])
+            for color in colors:
+                image_url = primary_images.get((article_code, color))
+                rich_content = build_rich_content(translation, image_url)
+                f.write(json.dumps({
+                    "article_code": article_code,
+                    "color": color,
+                    "rich_content": rich_content,
+                }, ensure_ascii=False) + "\n")
+                built += 1
 
     print(f"{built} rich-content JSON payload(s) built, saved to {OUTPUT_FILE}.")
     print("NOT pushed to Ozon yet -- schema is only community-corroborated, not confirmed against "

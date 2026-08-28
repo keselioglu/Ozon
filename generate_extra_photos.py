@@ -65,7 +65,7 @@ def center_crop_zoom(img, ratio):
     return cropped.resize((w, h), Image.LANCZOS)
 
 
-def generate_extra_photos_for_product(article_code, image_urls, output_dir):
+def generate_extra_photos_for_product(folder_key, image_urls, output_dir):
     """Downloads the product's real photos and generates ONE zoom crop per
     source photo (business instruction, 2026-08-27: "not the zoom of same
     photo use different photos to zoom" -- an earlier version cycled through
@@ -80,7 +80,7 @@ def generate_extra_photos_for_product(article_code, image_urls, output_dir):
     if needed <= 0 or not image_urls:
         return []
 
-    product_dir = os.path.join(output_dir, article_code)
+    product_dir = os.path.join(output_dir, folder_key)
     os.makedirs(product_dir, exist_ok=True)
 
     generated_paths = []
@@ -109,6 +109,12 @@ def generate_extra_photos_for_product(article_code, image_urls, output_dir):
     return generated_paths
 
 
+def color_token(color):
+    """Same normalization as upload_to_ozon.build_sku's color token, so
+    output folder names line up with how offer_ids actually key color."""
+    return (color or "").replace(" ", "").upper()
+
+
 def main():
     try:
         df = pd.read_csv(PRODUCTS_CSV, encoding="utf-8-sig")
@@ -117,7 +123,14 @@ def main():
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    unique = df.drop_duplicates("ms_article_code")
+    # Keyed by (article_code, color) -- NOT article_code alone. An article
+    # with multiple colors has different real photos per color; grouping by
+    # article code alone would silently pick whichever color's row came
+    # first in products.csv and generate crops from the WRONG color for
+    # every other color variant (same bug class confirmed live in
+    # generate_product_videos.py, 2026-08-28 -- a white product's video
+    # ended up pushed to a black offer_id).
+    unique = df.drop_duplicates(["ms_article_code", "color"])
     total_needing = 0
     total_generated = 0
 
@@ -125,17 +138,19 @@ def main():
         article_code = row.get("ms_article_code")
         if pd.isna(article_code):
             continue
+        color = row.get("color")
 
         image_urls = [u.strip() for u in str(row.get("image_urls") or "").split("|") if u.strip()]
         real_count = len(image_urls)
         if real_count >= TARGET_PHOTO_COUNT:
             continue
 
+        folder_key = f"{article_code}_{color_token(color)}"
         total_needing += 1
-        print(f"{article_code}: {real_count} real photo(s), generating {TARGET_PHOTO_COUNT - real_count} crop(s)...")
-        generated = generate_extra_photos_for_product(article_code, image_urls, OUTPUT_DIR)
+        print(f"{folder_key}: {real_count} real photo(s), generating {TARGET_PHOTO_COUNT - real_count} crop(s)...")
+        generated = generate_extra_photos_for_product(folder_key, image_urls, OUTPUT_DIR)
         total_generated += len(generated)
-        print(f"  -> {len(generated)} file(s) written to {OUTPUT_DIR}/{article_code}/")
+        print(f"  -> {len(generated)} file(s) written to {OUTPUT_DIR}/{folder_key}/")
 
     print(f"\n{total_needing} product(s) needed extra photos, {total_generated} crop(s) generated total.")
     print(f"Files are local only in {OUTPUT_DIR}/ — not yet uploaded anywhere. "

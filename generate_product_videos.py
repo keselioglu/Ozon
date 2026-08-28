@@ -46,15 +46,17 @@ def download_image(url, out_path, timeout=15):
         f.write(resp.content)
 
 
-def build_video_for_product(article_code, image_urls, output_dir):
+def build_video_for_product(folder_key, image_urls, output_dir):
     """Downloads up to MAX_PHOTOS_PER_VIDEO real photos and renders a
-    pan/zoom slideshow MP4 + a cover JPG (the first photo). Returns
-    (video_path, cover_path) or (None, None) if there were no usable photos."""
+    pan/zoom slideshow MP4 + a cover JPG (the first photo). folder_key is
+    "{article_code}_{COLOR}" -- see main()'s docstring note on why color is
+    part of the key. Returns (video_path, cover_path) or (None, None) if
+    there were no usable photos."""
     photos = image_urls[:MAX_PHOTOS_PER_VIDEO]
     if not photos:
         return None, None
 
-    product_dir = os.path.join(output_dir, article_code)
+    product_dir = os.path.join(output_dir, folder_key)
     os.makedirs(product_dir, exist_ok=True)
 
     local_photos = []
@@ -142,6 +144,12 @@ def build_video_for_product(article_code, image_urls, output_dir):
     return video_path, cover_path
 
 
+def color_token(color):
+    """Same normalization as upload_to_ozon.build_sku's color token, so
+    output folder names line up with how offer_ids actually key color."""
+    return (color or "").replace(" ", "").upper()
+
+
 def main():
     try:
         df = pd.read_csv(PRODUCTS_CSV, encoding="utf-8-sig")
@@ -149,28 +157,37 @@ def main():
         return print(f"{PRODUCTS_CSV} not found.")
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    unique = df.drop_duplicates("ms_article_code")
+    # Keyed by (article_code, color) -- NOT article_code alone. An article
+    # with multiple colors (130 of 447 in this catalog, confirmed live
+    # 2026-08-28) has different real photos per color; grouping by article
+    # code alone silently picked whichever color's row came first in
+    # products.csv and generated ONE video shared across every color
+    # variant, which then got pushed to color variants it didn't match
+    # (confirmed live: a white product's video ended up on a black offer_id).
+    unique = df.drop_duplicates(["ms_article_code", "color"])
 
     total, ok, failed = 0, 0, 0
     for _, row in unique.iterrows():
         article_code = row.get("ms_article_code")
         if pd.isna(article_code):
             continue
+        color = row.get("color")
         image_urls = [u.strip() for u in str(row.get("image_urls") or "").split("|") if u.strip()]
         if not image_urls:
             continue
 
-        existing_video = os.path.join(OUTPUT_DIR, article_code, "video.mp4")
-        existing_cover = os.path.join(OUTPUT_DIR, article_code, "cover.jpg")
+        folder_key = f"{article_code}_{color_token(color)}"
+        existing_video = os.path.join(OUTPUT_DIR, folder_key, "video.mp4")
+        existing_cover = os.path.join(OUTPUT_DIR, folder_key, "cover.jpg")
         if os.path.exists(existing_video) and os.path.exists(existing_cover):
             total += 1
             ok += 1
             continue
 
         total += 1
-        print(f"{article_code}: building video from {min(len(image_urls), MAX_PHOTOS_PER_VIDEO)} photo(s)...")
+        print(f"{folder_key}: building video from {min(len(image_urls), MAX_PHOTOS_PER_VIDEO)} photo(s)...")
         try:
-            video_path, cover_path = build_video_for_product(article_code, image_urls, OUTPUT_DIR)
+            video_path, cover_path = build_video_for_product(folder_key, image_urls, OUTPUT_DIR)
         except Exception as e:
             # One product's unexpected failure (ffmpeg crash, disk issue,
             # etc.) must not kill the whole catalog run -- confirmed live
