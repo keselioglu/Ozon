@@ -261,46 +261,54 @@ def main():
 
     print(f"{len(to_submit)} item(s) ready to submit.\n")
 
+    # Submitted ONE AT A TIME, not batched. Confirmed live (2026-08-28):
+    # 100-item batches reported "imported" with zero errors for ~94% of
+    # items that, on direct re-check via /v4/product/info/attributes, never
+    # actually got the video attribute -- Ozon's import/info status is not
+    # reliable proof at batch scale. Single-item submissions, verified the
+    # same way, were 100% reliable in side-by-side testing. Slower, but
+    # correctness matters more than speed here -- a silently-wrong push is
+    # worse than a slow correct one.
     total_ok, total_failed = 0, 0
     succeeded_folders = set()
-    for i in range(0, len(to_submit), BATCH_SIZE):
-        batch = to_submit[i:i + BATCH_SIZE]
-        items = [item for _, _, item in batch]
-        offer_ids_in_batch = [oid for oid, _, _ in batch]
-
-        print(f"Pushing batch {i // BATCH_SIZE + 1} ({len(items)} item(s))...")
+    for idx, (oid, folder_key, item) in enumerate(to_submit, 1):
+        if idx % 50 == 0 or idx == len(to_submit):
+            print(f"  ... {idx}/{len(to_submit)}")
         try:
-            result = call("/v3/product/import", {"items": items})
+            result = call("/v3/product/import", {"items": [item]})
             task_id = result.get("result", {}).get("task_id")
-            print(f"  -> task_id={task_id}, waiting for processing...")
-            time.sleep(15)
-
+            time.sleep(3)
             info = call("/v1/product/import/info", {"task_id": task_id})
             info_items = info.get("result", {}).get("items", [])
-            status_by_offer = {it["offer_id"]: it for it in info_items}
+            status_entry = info_items[0] if info_items else {}
+
+            # Trust ONLY a direct re-read of the actual attribute, not the
+            # import/info status -- that's exactly what proved unreliable
+            # at batch scale.
+            check = call("/v4/product/info/attributes", {"filter": {"offer_id": [oid]}, "limit": 1})
+            check_items = check.get("result", [])
+            has_video = bool(check_items) and any(
+                a["id"] == ATTR_VIDEO_LINK and a["values"] and a["values"][0].get("value")
+                for a in check_items[0].get("attributes", [])
+            )
 
             with open(PUSH_LOG, "a", encoding="utf-8") as f:
-                for oid, folder_key, _ in batch:
-                    status_entry = status_by_offer.get(oid, {})
-                    # "skipped" means Ozon saw identical content already in
-                    # place and treated the resubmission as a no-op -- NOT
-                    # a failure (confirmed live, 2026-08-28).
-                    ok = status_entry.get("status") in ("imported", "skipped") and not status_entry.get("errors")
-                    f.write(json.dumps({
-                        "offer_id": oid, "folder_key": folder_key,
-                        "status": status_entry.get("status"), "errors": status_entry.get("errors"),
-                    }, ensure_ascii=False) + "\n")
-                    if ok:
-                        total_ok += 1
-                        succeeded_folders.add(folder_key)
-                    else:
-                        total_failed += 1
-                        print(f"  FAIL {oid}: {status_entry.get('errors')}")
-        except Exception as e:
-            print(f"  ! batch failed: {e}")
-            total_failed += len(items)
+                f.write(json.dumps({
+                    "offer_id": oid, "folder_key": folder_key,
+                    "status": status_entry.get("status"), "errors": status_entry.get("errors"),
+                    "verified_live": has_video,
+                }, ensure_ascii=False) + "\n")
 
-        time.sleep(1)
+            if has_video:
+                total_ok += 1
+                succeeded_folders.add(folder_key)
+            else:
+                total_failed += 1
+                print(f"  FAIL {oid}: status={status_entry.get('status')} errors={status_entry.get('errors')} "
+                      f"(attribute not present on re-check)")
+        except Exception as e:
+            print(f"  ! {oid} failed: {e}")
+            total_failed += 1
 
     print(f"\n{total_ok} offer_id(s) updated successfully, {total_failed} failed.")
 
