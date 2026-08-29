@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 
 import pandas as pd
 
@@ -38,6 +39,7 @@ MAPPING_LOG = "mapping_log.jsonl"
 SKIPPED_LOG = "upload_skipped.jsonl"
 TASK_LOG = "upload_tasks.jsonl"
 DEFERRED_LOG = "deferred_items.json"
+NEW_ITEMS_LOG = "new_items_submitted.json"
 
 TRY_TO_USD_RATE = 0.083
 MERGE_ATTR_ID = 8292  # "Merge on One PDP" — grouping key so size/color variants share one product page
@@ -332,6 +334,23 @@ def main():
 
     to_upload = update_items + new_items
 
+    # Log exactly which offer_ids were submitted as NEW (creates) today,
+    # separate from updates -- added 2026-08-29 after a day where the
+    # code correctly capped/submitted 250 new-product creates but Ozon's
+    # live quota (/v4/product/info/limit) showed only 142 used hours later,
+    # and the cause couldn't be pinned down after the fact because nothing
+    # recorded which specific offer_ids were meant to be "new" that run.
+    # With this log, a future discrepancy can be checked directly: which of
+    # today's logged new_offer_ids still show sku=0 or aren't live at all.
+    if new_items:
+        with open(NEW_ITEMS_LOG, "w", encoding="utf-8") as f:
+            json.dump({
+                "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                "quota_before": quota.get("daily_create") if quota else None,
+                "new_offer_ids": [it["offer_id"] for it in new_items],
+            }, f, ensure_ascii=False, indent=2)
+        print(f"Logged {len(new_items)} new-product offer_id(s) submitted today to {NEW_ITEMS_LOG}.\n")
+
     if not to_upload:
         print("Nothing within quota to upload right now.")
     else:
@@ -349,6 +368,13 @@ def main():
 
         print(f"\nUpload requests submitted for {len(to_upload)} item(s). Check status with check_upload_status.py")
         print(f"(Ozon processes asynchronously — task_ids logged to {TASK_LOG})")
+
+        quota_after = check_quota()
+        if quota_after:
+            print(f"Daily create quota immediately after submission: "
+                  f"{quota_after.get('daily_create', {}).get('usage')}/{quota_after.get('daily_create', {}).get('limit')} used "
+                  f"(compare against {len(new_items)} new item(s) just submitted -- a gap here confirms Ozon's usage "
+                  f"counter lags submission, not that items were lost).")
 
     if deferred:
         with open(DEFERRED_LOG, "w", encoding="utf-8") as f:

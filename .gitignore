@@ -5,6 +5,7 @@
 *_log.txt
 *.jsonl
 deferred_items.json
+new_items_submitted.json
 category_processed_log.txt
 processed_log.txt
 failed_urls.txt
