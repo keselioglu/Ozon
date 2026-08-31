@@ -84,25 +84,13 @@ def _key(entry):
     return (entry["offer_id"], entry["warehouse_id"])
 
 
-def main():
-    try:
-        df = pd.read_csv(PRODUCTS_CSV, encoding="utf-8-sig")
-    except FileNotFoundError:
-        return print(f"{PRODUCTS_CSV} not found.")
-
-    all_updates = build_stock_updates(df)
-    print(f"{len(all_updates)} candidate stock update(s) from {PRODUCTS_CSV}.")
-
-    # Only push stock for offer_ids that actually exist on Ozon — this script
-    # updates, it never creates.
-    offer_ids = [u["offer_id"] for u in all_updates]
-    existing = find_existing_offer_ids(offer_ids)
-    existing_updates = [u for u in all_updates if u["offer_id"] in existing]
-    skipped_not_uploaded = len(all_updates) - len(existing_updates)
-
-    print(f"{len(existing_updates)} of those already exist on Ozon (will be updated).")
-    print(f"{skipped_not_uploaded} skipped — not yet uploaded as a product.\n")
-
+def push_stock_updates_for(existing_updates):
+    """Takes [{offer_id, stock}, ...] for offer_ids ALREADY confirmed to
+    exist on Ozon, applies warehouse routing, and pushes with the same
+    batch/retry logic as the full daily run. Shared by main() (whole
+    catalog) and check_todays_stock.py (today's newly created offer_ids
+    only, GitHub instruction 2026-08-31: check at 6am whether today's new
+    products have stock and open it if not)."""
     if not existing_updates:
         return print("Nothing to update.")
 
@@ -175,6 +163,29 @@ def main():
                     print(f"  FAIL (after moderation retry) {r.get('offer_id')} @ {r.get('warehouse_id')}: {error_text}")
 
     print(f"\nDone. {total_ok} updated, {total_failed} failed.")
+    return total_ok, total_failed
+
+
+def main():
+    try:
+        df = pd.read_csv(PRODUCTS_CSV, encoding="utf-8-sig")
+    except FileNotFoundError:
+        return print(f"{PRODUCTS_CSV} not found.")
+
+    all_updates = build_stock_updates(df)
+    print(f"{len(all_updates)} candidate stock update(s) from {PRODUCTS_CSV}.")
+
+    # Only push stock for offer_ids that actually exist on Ozon — this script
+    # updates, it never creates.
+    offer_ids = [u["offer_id"] for u in all_updates]
+    existing = find_existing_offer_ids(offer_ids)
+    existing_updates = [u for u in all_updates if u["offer_id"] in existing]
+    skipped_not_uploaded = len(all_updates) - len(existing_updates)
+
+    print(f"{len(existing_updates)} of those already exist on Ozon (will be updated).")
+    print(f"{skipped_not_uploaded} skipped — not yet uploaded as a product.\n")
+
+    push_stock_updates_for(existing_updates)
 
 
 if __name__ == "__main__":
