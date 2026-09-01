@@ -30,13 +30,24 @@ TYPE_ID_PANTIES_SET = 970617577  # "Underwear Trunks/Panties Set" — multi-pack
 
 CATEGORY_ID_CLOTHING = 200000933
 TYPE_ID_TANK_TOP = 93150         # "Tank Top" — matches M&S "atlet"
+TYPE_ID_PAJAMA = 93176           # "Pajama" — matches M&S "pijama" (confirmed live, 2026-09-01:
+                                 # same required-attribute set as tank top -- 9163/10096/31/4295/8292/8229)
 
 ATTR_SIZE = 4295
 ATTR_GENDER = 9163
 ATTR_COLOR = 10096
 ATTR_BRAND = 31
+ATTR_TYPE = 8229  # required for tank top (93150) and pajama (93176); its
+                  # dictionary value id equals the type_id itself for both
+                  # (confirmed live, 2026-09-01) -- not previously set in
+                  # uploads despite being is_required=True, apparently
+                  # non-enforced by Ozon's API for tank tops, but set
+                  # explicitly here anyway now that pajama needs it too.
 
-GENDER_FEMALE_ID = 22881  # confirmed against the live dictionary
+# Confirmed against the live dictionary for both 93238 (panties) and 93176
+# (pajama) category/type pairs -- same IDs across at least these two types.
+GENDER_FEMALE_ID = 22881
+GENDER_MALE_ID = 22880
 
 # Verified via /v1/description-category/attribute/values/search — several near-duplicate
 # brand entries exist (e.g. "Marks&Spencer", "Marks & Spenser" misspelling), so this is
@@ -236,15 +247,44 @@ def map_color_to_ozon(mands_color):
 
 def resolve_category_and_type(name, is_set_hint):
     """Determines (description_category_id, type_id) from the M&S product name.
-    Keyword-based: 'kulot'/'külot' = underwear briefs, 'atlet' = tank top.
-    Returns None if the product doesn't match a known category — caller should
-    skip rather than guess, since an unmapped category means unknown required fields."""
+    Keyword-based: 'kulot'/'külot'/'tanga'/'boxer'/'trunk'/'brief'/'slip'/
+    'hipster' = underwear (Ozon has no separate men's-underwear type --
+    confirmed live, 2026-09-01: men's briefs use the exact same
+    category/type as women's, just a different gender attribute value, see
+    resolve_gender), 'atlet' = tank top, 'pijama'/'pyjama' = pajama.
+    Returns (None, None) if the product doesn't match a known category --
+    caller should skip rather than guess, since an unmapped category means
+    unknown required fields."""
     lower = (name or "").lower()
-    if "kulot" in lower or "külot" in lower or "tanga" in lower:
+    if any(kw in lower for kw in ("kulot", "külot", "tanga", "boxer", "trunk", "brief", "slip", "hipster")):
         return CATEGORY_ID, (TYPE_ID_PANTIES_SET if is_set_hint else TYPE_ID_PANTIES)
     if "atlet" in lower:
         return CATEGORY_ID_CLOTHING, TYPE_ID_TANK_TOP
+    if "pijama" in lower or "pyjama" in lower:
+        return CATEGORY_ID_CLOTHING, TYPE_ID_PAJAMA
     return None, None
+
+
+def resolve_gender(url):
+    """Determines the ATTR_GENDER dictionary value id from the M&S URL's
+    own erkek-/kadin- gender prefix (confirmed reliable, 2026-09-01: every
+    M&S TR product URL starts with "erkek-" (men's) or "kadin-" (women's)
+    directly after the domain). Defaults to GENDER_FEMALE_ID when the URL
+    doesn't have a recognizable prefix or is missing -- this pipeline's
+    catalog is overwhelmingly women's underwear, so that was the prior
+    (undetected) default in practice; only flips to male on an explicit
+    "erkek" match rather than guessing either way from ambiguous input.
+
+    Fixes a real bug found live, 2026-09-01: attribute 9163 (gender) was
+    hardcoded to GENDER_FEMALE_ID for every single product regardless of
+    the source URL, meaning any men's product this pipeline uploaded
+    (boxer/trunk/brief) would have been incorrectly tagged as women's."""
+    if not url:
+        return GENDER_FEMALE_ID
+    path = url.split("marksandspencer.com.tr/", 1)[-1].lower()
+    if path.startswith("erkek-") or "/erkek-" in path:
+        return GENDER_MALE_ID
+    return GENDER_FEMALE_ID
 
 
 def log_mapping_decision(log_path, sku, field, input_value, output_value, warning):

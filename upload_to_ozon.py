@@ -19,9 +19,9 @@ if sys.platform == "win32":
 
 from ozon_client import call
 from ozon_mapping import (
-    ATTR_BRAND, ATTR_COLOR, ATTR_GENDER, ATTR_SIZE, BRAND_MARKS_AND_SPENCER_ID,
-    GENDER_FEMALE_ID, extract_article_code_from_offer_id, log_mapping_decision,
-    map_color_to_ozon, map_size_to_eu, map_size_to_ozon, resolve_category_and_type,
+    ATTR_BRAND, ATTR_COLOR, ATTR_GENDER, ATTR_SIZE, ATTR_TYPE, BRAND_MARKS_AND_SPENCER_ID,
+    CATEGORY_ID_CLOTHING, extract_article_code_from_offer_id, log_mapping_decision,
+    map_color_to_ozon, map_size_to_eu, map_size_to_ozon, resolve_category_and_type, resolve_gender,
 )
 from ozon_translations import BRAND_PREFIX, COLLECTION_ID, WARRANTY_ID, get_translation
 
@@ -147,7 +147,7 @@ def build_ozon_item(row, offer_id_suffix=""):
     attributes = [
         {"id": ATTR_SIZE, "values": [{"dictionary_value_id": size_id}]},
         {"id": ATTR_COLOR, "values": [{"dictionary_value_id": color_id}]},
-        {"id": ATTR_GENDER, "values": [{"dictionary_value_id": GENDER_FEMALE_ID}]},
+        {"id": ATTR_GENDER, "values": [{"dictionary_value_id": resolve_gender(row.get("url"))}]},
         {"id": ATTR_BRAND, "values": [{"dictionary_value_id": BRAND_MARKS_AND_SPENCER_ID}]},
         {"id": MERGE_ATTR_ID, "values": [{"value": f"mands-{article_code}"}]},
         {"id": ATTR_CARE, "values": [{"value": translation["care_text"]}]},
@@ -161,6 +161,12 @@ def build_ozon_item(row, offer_id_suffix=""):
         attributes.append({"id": ATTR_MATERIAL, "values": [{"dictionary_value_id": translation["material_id"]}]})
     if translation.get("planting_type_id"):
         attributes.append({"id": ATTR_PLANTING_TYPE, "values": [{"dictionary_value_id": translation["planting_type_id"]}]})
+    if category_id == CATEGORY_ID_CLOTHING:
+        # Required for tank top (93150) / pajama (93176), not present at all
+        # in the underwear category's attribute dictionary -- its own
+        # dictionary value id equals the type_id itself for both (confirmed
+        # live, 2026-09-01).
+        attributes.append({"id": ATTR_TYPE, "values": [{"dictionary_value_id": type_id}]})
 
     item = {
         "offer_id": f"{sku}{offer_id_suffix}",
