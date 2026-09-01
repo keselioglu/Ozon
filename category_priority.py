@@ -119,11 +119,24 @@ def find_new_product_urls_in_category(category_url, live_offer_ids, already_queu
     return new_urls
 
 
-def run_priority_cycle():
-    """Walks category_priority.csv from priority 1, stopping at the first
-    supported category with at least one not-yet-live product. Appends any
-    found URLs to product_urls.txt for crawler.py's normal crawl pass to pick
-    up. Returns a summary dict for logging."""
+def run_priority_cycle(target_new_products=None):
+    """Walks category_priority.csv from priority 1, queuing every
+    not-yet-live product it finds along the way. Keeps walking categories
+    (does NOT stop at the first hit) until either every category has been
+    checked, or the number of new URLs queued so far reaches
+    target_new_products -- business instruction, 2026-09-01: "correct to
+    code to not stop daily unless fills the quota". target_new_products
+    should be the day's remaining daily_create quota (see main()); pass
+    None to walk every category regardless (e.g. for a manual full sweep).
+
+    Previously this stopped at the FIRST category with any new product at
+    all, queuing only that one category's finds and leaving the rest of the
+    list (446 more categories) unchecked for the day -- confirmed live,
+    2026-09-01: a day's crawl found only 2 new URLs and stopped, even
+    though 131 of that day's 250-item quota was still unused with nothing
+    to fill it. Appends found URLs to product_urls.txt for crawler.py's
+    normal crawl pass to pick up, same as before. Returns a summary dict
+    for logging."""
     categories = load_priority_categories()
     already_queued = load_line_set(URLS_FILE)
 
@@ -132,6 +145,11 @@ def run_priority_cycle():
     print(f"{len(live_offer_ids)} MS-* offer_id(s) currently live.\n")
 
     skipped_unsupported = 0
+    total_new_found = 0
+    categories_with_new = 0
+    last_priority = None
+    last_category_name = None
+
     for row in categories:
         name = row.get("Category Name (TR)")
         url = row.get("Full URL")
@@ -151,28 +169,59 @@ def run_priority_cycle():
         with open(URLS_FILE, "a", encoding="utf-8") as f:
             for u in sorted(new_urls):
                 f.write(u + "\n")
+        already_queued.update(new_urls)
 
-        print(f"  -> {len(new_urls)} new product(s) found and queued. Stopping today's category walk.\n")
-        return {
-            "stopped_at_priority": priority,
-            "stopped_at_category": name,
-            "new_urls_found": len(new_urls),
-            "categories_checked": categories.index(row) + 1 - skipped_unsupported,
-            "categories_skipped_unsupported": skipped_unsupported,
-        }
+        total_new_found += len(new_urls)
+        categories_with_new += 1
+        last_priority = priority
+        last_category_name = name
+        print(f"  -> {len(new_urls)} new product(s) found and queued "
+              f"({total_new_found} total so far this run).\n")
 
-    print("Walked every supported category in the priority list — nothing new anywhere today.\n")
+        if target_new_products is not None and total_new_found >= target_new_products:
+            print(f"Reached today's target of {target_new_products} new product(s) "
+                  f"(quota-driven) -- stopping category walk.\n")
+            return {
+                "stopped_at_priority": priority,
+                "stopped_at_category": name,
+                "new_urls_found": total_new_found,
+                "categories_checked": categories.index(row) + 1 - skipped_unsupported,
+                "categories_skipped_unsupported": skipped_unsupported,
+                "stopped_reason": "quota_target_reached",
+            }
+
+    print(f"Walked every supported category in the priority list -- {total_new_found} "
+          f"new product(s) found across {categories_with_new} categor(y/ies).\n")
     return {
-        "stopped_at_priority": None,
-        "stopped_at_category": None,
-        "new_urls_found": 0,
+        "stopped_at_priority": last_priority,
+        "stopped_at_category": last_category_name,
+        "new_urls_found": total_new_found,
         "categories_checked": len(categories) - skipped_unsupported,
         "categories_skipped_unsupported": skipped_unsupported,
+        "stopped_reason": "exhausted_all_categories",
     }
 
 
 def main():
-    summary = run_priority_cycle()
+    # Target the day's remaining daily_create quota so discovery doesn't
+    # stop early and leave quota unused, but also doesn't crawl far more
+    # than can actually be uploaded today. Falls back to walking every
+    # category (no target) if the quota can't be read for any reason.
+    target = None
+    try:
+        from upload_to_ozon import check_quota
+        quota = check_quota()
+        if quota:
+            daily_create = quota.get("daily_create", {})
+            remaining = daily_create.get("limit", 0) - daily_create.get("usage", 0)
+            if remaining > 0:
+                target = remaining
+                print(f"Today's remaining daily_create quota: {remaining} -- "
+                      f"will keep discovering until this many new products are queued.\n")
+    except Exception as e:
+        print(f"Could not read quota ({e}) -- discovering across all categories instead.\n")
+
+    summary = run_priority_cycle(target_new_products=target)
     print("Summary:", summary)
 
 
