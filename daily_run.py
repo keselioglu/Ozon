@@ -19,6 +19,13 @@ Scheduler once a day. Runs, in order:
   7c. Detect (log-only for now) any campaign product Ozon added
      automatically rather than through 7b (check_auto_added_campaign_products.py).
   8. Log to TASKS.md, commit & push.
+  9. Post the run summary as a comment on GitHub issue #13 (business
+     instruction, 2026-09-02: "i just need reminders and daily reports to my
+     phone while i am away") -- the user has no push-notification channel
+     set up (PushNotification requires Remote Control pairing, not done),
+     but is signed into GitHub mobile, so a comment there arrives as a
+     native phone notification. Not a hard failure if this step errors --
+     the run itself already succeeded/failed independently of reporting it.
 
 Each step is a subprocess call to the existing, already-working scripts. This
 script does not reimplement their logic — it only sequences them and stops on
@@ -29,6 +36,7 @@ All output is appended to daily_run_<date>.log (gitignored, like the other
 *_log.txt state files) so a run can be inspected after the fact even though
 Task Scheduler runs it headless.
 """
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -41,6 +49,27 @@ if sys.platform == "win32":
 REPO_DIR = Path(__file__).resolve().parent
 TODAY = datetime.now().strftime("%Y-%m-%d")
 LOG_FILE = REPO_DIR / f"daily_run_{TODAY}.log"
+
+REPORT_REPO = "keselioglu/Ozon"
+REPORT_ISSUE = 13
+GH_EXE = shutil.which("gh") or r"C:\Program Files\GitHub CLI\gh.exe"
+
+
+def post_github_report(body):
+    """Posts `body` as a comment on the daily-reports tracking issue, so it
+    reaches the user's phone via GitHub's own notifications. Best-effort --
+    logs and swallows any failure rather than affecting the run's outcome."""
+    try:
+        result = subprocess.run(
+            [GH_EXE, "issue", "comment", str(REPORT_ISSUE), "--repo", REPORT_REPO, "--body", body],
+            cwd=REPO_DIR, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+        )
+        if result.returncode != 0:
+            log(f"Could not post GitHub report: {result.stderr.strip()}")
+        else:
+            log("Posted run summary to GitHub issue #13.")
+    except Exception as e:
+        log(f"Could not post GitHub report: {e}")
 
 
 def log(msg):
@@ -302,6 +331,11 @@ def main():
         for a in attention:
             log(f"  {a}")
 
+    report = f"### Daily run: {TODAY}\n\n{summary}"
+    if attention:
+        report += "\n\n**Needs attention:**\n" + "\n".join(f"- {a}" for a in attention)
+    post_github_report(report)
+
 
 def _finalize_failed_run(reason, tasks_note=False, translated=0, translated_codes=None):
     """Records a failed run in TASKS.md and commits whatever partial progress exists,
@@ -315,6 +349,7 @@ def _finalize_failed_run(reason, tasks_note=False, translated=0, translated_code
     except Exception as e:
         log(f"Could not even log the failure to TASKS.md: {e}")
     log(summary)
+    post_github_report(f"### Daily run: {TODAY}\n\n**FAILED**\n\n{summary}")
 
 
 if __name__ == "__main__":
