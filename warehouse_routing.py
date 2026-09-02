@@ -25,7 +25,17 @@ stock write (real count at the target, 0 at the other) -- it doesn't fetch
 stock counts itself. Callers (update_stocks.py, refresh_live_stock.py) still
 own "what's the real stock count," this owns "which warehouse should it be
 in today."
+
+Also writes its own routing decisions to WAREHOUSE_STATE_FILE every run
+(business instruction, 2026-09-02: "add number of products in warehouses to
+daily report") -- Ozon's stock-read endpoints don't reliably report back
+which warehouse currently holds a product's real stock (confirmed live,
+2026-09-02: /v4/product/info/stocks' warehouse_ids field came back empty
+even for products known to be routed, and the dedicated
+stocks-by-warehouse endpoint is obsolete/rejected by the API), so this is
+tracked here rather than re-derived from an unreliable read.
 """
+import json
 import sys
 
 if sys.platform == "win32":
@@ -36,6 +46,7 @@ from ozon_client import call
 
 REGULAR_WAREHOUSE_ID = 1020000320456000   # "Ozpark Bee Concept"
 SMALL_WAREHOUSE_ID = 1020002288795000     # "Small Items Warehouse_below_500gr"
+WAREHOUSE_STATE_FILE = "warehouse_assignments.json"
 
 WEIGHT_THRESHOLD_G = 500
 PRICE_THRESHOLD_USD = 80.0
@@ -138,4 +149,29 @@ def build_routed_stock_updates(offer_id_to_stock):
     for oid in other_offer_ids:
         updates.append({"offer_id": oid, "stock": offer_id_to_stock[oid], "warehouse_id": REGULAR_WAREHOUSE_ID})
 
+    save_warehouse_assignments(updates)
     return updates, skipped
+
+
+def save_warehouse_assignments(updates):
+    """Persists the CURRENT (non-zero-stock) warehouse assignment per
+    offer_id from this run's routing decisions, overwriting the prior
+    state -- this file always reflects "as of the last routing run," not a
+    history (the daily report is responsible for snapshotting counts from
+    this into its own dated history)."""
+    assignments = {}
+    for u in updates:
+        if u["stock"] > 0:
+            assignments[u["offer_id"]] = u["warehouse_id"]
+    with open(WAREHOUSE_STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(assignments, f, ensure_ascii=False, indent=2)
+
+
+def load_warehouse_assignments():
+    """offer_id -> warehouse_id, from the last routing run. Returns {} if
+    the state file doesn't exist yet (before the first routing run)."""
+    try:
+        with open(WAREHOUSE_STATE_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}

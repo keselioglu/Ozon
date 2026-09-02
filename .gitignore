@@ -12,6 +12,7 @@ price_changes_today.json
 margin_risk_removals.jsonl
 catalog_margin_risk_today.json
 daily_report_history.jsonl
+warehouse_assignments.json
 category_processed_log.txt
 processed_log.txt
 failed_urls.txt

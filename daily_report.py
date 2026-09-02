@@ -96,6 +96,7 @@ from margin_pricing import compute_ratio_pct, fetch_usd_try_rate, load_ms_prices
 from ozon_client import call
 from refresh_live_stock import fetch_live_offer_ids_matching, load_legacy_url_map, load_pipeline_url_map
 from upload_to_ozon import check_quota
+from warehouse_routing import REGULAR_WAREHOUSE_ID, SMALL_WAREHOUSE_ID, load_warehouse_assignments
 
 HISTORY_FILE = "daily_report_history.jsonl"
 NEW_ITEMS_LOG = "new_items_submitted.json"
@@ -211,6 +212,17 @@ def get_total_live_count():
         if not cursor or not items:
             break
     return total
+
+
+def get_warehouse_counts():
+    """(small_count, regular_count) from warehouse_routing.py's own
+    last-run state (Ozon's stock-read endpoints don't reliably report
+    current warehouse assignment back -- see warehouse_routing.py
+    docstring, confirmed live 2026-09-02)."""
+    assignments = load_warehouse_assignments()
+    small = sum(1 for wid in assignments.values() if wid == SMALL_WAREHOUSE_ID)
+    regular = sum(1 for wid in assignments.values() if wid == REGULAR_WAREHOUSE_ID)
+    return small, regular
 
 
 def get_catalog_margin_flagged_count():
@@ -368,6 +380,8 @@ def build_markdown(today, yesterday):
         row("Products in campaigns", "campaign_str", fmt_pair=lambda v: v or "?"),
         row("Live products with cost > 46%", "catalog_flagged"),
         row("Average cost % of products in campaigns", "avg_campaign_ratio", suffix="%"),
+        row("Products in Small Items warehouse", "small_warehouse_count"),
+        row("Products in Ozpark (regular) warehouse", "regular_warehouse_count"),
         "",
         "| Sales (rolling 24h) | Today | Yesterday |",
         "|---|---|---|",
@@ -431,6 +445,9 @@ def main():
     print("Catalog margin flagged count...")
     catalog_flagged = get_catalog_margin_flagged_count()
 
+    print("Warehouse assignment counts...")
+    small_wh_count, regular_wh_count = get_warehouse_counts()
+
     print("Sales (last 24h, via posting lists)...")
     sales_today = get_sales_window(now - timedelta(hours=24), now)
 
@@ -441,6 +458,8 @@ def main():
         "quota_left": quota_left,
         "campaign_str": f"{enrolled_count} in campaigns / {total_live} total live",
         "catalog_flagged": catalog_flagged,
+        "small_warehouse_count": small_wh_count,
+        "regular_warehouse_count": regular_wh_count,
         "avg_campaign_ratio": avg_campaign_ratio,
         "units_sold": sales_today["units_sold"],
         "revenue_usd": sales_today["revenue_usd"],
