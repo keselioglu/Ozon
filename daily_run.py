@@ -14,6 +14,10 @@ Scheduler once a day. Runs, in order:
   6. Sync stock for today's crawled/uploaded rows (update_stocks.py).
   7. Refresh stock for all live M&S-sourced Ozon products with a known source
      URL, whether or not this pipeline crawled them today (refresh_live_stock.py).
+  7a. Refresh today's M&S price for every live, source-URL-known product
+     (refresh_prices.py) -- business instruction, 2026-09-02: "do we have a
+     data of updated prices on marks&spencer daily? yes build it and update
+     it daily". Tracking-only: does not push anything to Ozon.
   7b. Sweep any in-stock, eligible product into its active Ozon campaign(s)
      (enroll_campaigns.py).
   7c. Detect (log-only for now) any campaign product Ozon added
@@ -288,6 +292,18 @@ def main():
         done_line = next((l for l in live_stock_output.splitlines() if l.startswith("Done.")), "")
         counts["live_stock_summary"] = done_line
 
+    # 7a. Refresh today's M&S price for every live, source-URL-known product
+    # (refresh_prices.py, business instruction 2026-09-02). Tracking-only --
+    # does not push anything to Ozon. Not a hard failure either way.
+    ok, price_output = run_step("Price refresh (refresh_prices.py)", ["refresh_prices.py"], timeout=3600)
+    if not ok:
+        attention.append("Price refresh step failed — see log for details.")
+    elif "Done." in price_output:
+        done_line = next((l for l in price_output.splitlines() if l.startswith("Done.")), "")
+        counts["price_summary"] = done_line
+        if ", 0 changed," not in done_line:
+            attention.append(f"M&S price changes detected today: {done_line}")
+
     # 7b. Sweep any in-stock, eligible product into its active Ozon
     # campaign(s) (enroll_campaigns.py, GitHub issue #10) -- runs after
     # stock refresh so a product that just restocked is picked up the same
@@ -323,6 +339,7 @@ def main():
         f"{counts.get('upload_totals', 'upload status unknown')}, "
         f"{counts.get('stock_summary', 'stock sync status unknown')}, "
         f"{counts.get('live_stock_summary', 'live stock refresh status unknown')}, "
+        f"{counts.get('price_summary', 'price refresh status unknown')}, "
         f"{counts.get('campaign_summary', 'campaign enrollment status unknown')}"
     )
     update_tasks_md(summary)
