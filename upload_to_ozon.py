@@ -348,14 +348,34 @@ def main():
     # recorded which specific offer_ids were meant to be "new" that run.
     # With this log, a future discrepancy can be checked directly: which of
     # today's logged new_offer_ids still show sku=0 or aren't live at all.
+    #
+    # ACCUMULATES across every run today rather than overwriting -- fixed
+    # 2026-09-02 after the 4am main run logged 250 new offer_ids, then the
+    # 5am quota-topup run (same script, same log file) overwrote that with
+    # its own 2, so by 6am check_todays_stock.py only ever saw the last
+    # run's handful instead of the whole day's 250+2. Business instruction:
+    # 6am must check stock for ALL of today's added products, not just the
+    # most recent run's.
     if new_items:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        existing_today_ids = []
+        try:
+            with open(NEW_ITEMS_LOG, encoding="utf-8") as f:
+                prior = json.load(f)
+            if prior.get("date") == today:
+                existing_today_ids = prior.get("new_offer_ids", [])
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+
+        combined_ids = existing_today_ids + [it["offer_id"] for it in new_items]
         with open(NEW_ITEMS_LOG, "w", encoding="utf-8") as f:
             json.dump({
-                "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                "date": today,
                 "quota_before": quota.get("daily_create") if quota else None,
-                "new_offer_ids": [it["offer_id"] for it in new_items],
+                "new_offer_ids": combined_ids,
             }, f, ensure_ascii=False, indent=2)
-        print(f"Logged {len(new_items)} new-product offer_id(s) submitted today to {NEW_ITEMS_LOG}.\n")
+        print(f"Logged {len(new_items)} new-product offer_id(s) from this run "
+              f"({len(combined_ids)} total logged for today) to {NEW_ITEMS_LOG}.\n")
 
     if not to_upload:
         print("Nothing within quota to upload right now.")

@@ -17,6 +17,7 @@ than duplicating it.
 """
 import json
 import sys
+from datetime import datetime, timezone
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -36,6 +37,11 @@ def main():
             new_items = json.load(f)
     except FileNotFoundError:
         return print(f"{NEW_ITEMS_LOG} not found -- nothing submitted as new today (or upload step hasn't run yet).")
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if new_items.get("date") != today:
+        return print(f"{NEW_ITEMS_LOG} is from {new_items.get('date')}, not today ({today}) -- "
+                      "today's upload step may not have run yet (or failed). Not re-checking stale data.")
 
     todays_offer_ids = set(new_items.get("new_offer_ids", []))
     print(f"{len(todays_offer_ids)} offer_id(s) submitted as new today ({new_items.get('date')}).\n")
