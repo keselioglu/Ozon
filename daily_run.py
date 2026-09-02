@@ -56,9 +56,13 @@ GH_EXE = shutil.which("gh") or r"C:\Program Files\GitHub CLI\gh.exe"
 
 
 def post_github_report(body):
-    """Posts `body` as a comment on the daily-reports tracking issue, so it
-    reaches the user's phone via GitHub's own notifications. Best-effort --
-    logs and swallows any failure rather than affecting the run's outcome."""
+    """Posts `body` as a comment on the daily-reports tracking issue, from the
+    Tugberk-AI collaborator account, mentioning @keselioglu so it actually
+    triggers a phone notification (confirmed live, 2026-09-02: GitHub does
+    not notify on self-mentions, so this must be posted by a different
+    account than the recipient's own). Best-effort -- logs and swallows any
+    failure rather than affecting the run's outcome."""
+    body = f"@keselioglu\n\n{body}"
     try:
         result = subprocess.run(
             [GH_EXE, "issue", "comment", str(REPORT_ISSUE), "--repo", REPORT_REPO, "--body", body],
