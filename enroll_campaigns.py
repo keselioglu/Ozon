@@ -35,10 +35,23 @@ libraries, then verified live on this account, 2026-08-27):
   POST /v1/actions/candidates           -- list eligible-not-yet-enrolled products
   POST /v1/actions/products/activate    -- enroll products at a chosen price
 
-Not part of daily_run.py's core steps yet -- see module-level TODO in
-daily_run.py once this is confirmed working; can be added as its own step.
+Wired into daily_run.py as its own step (runs after live stock refresh).
+
+Also writes campaign_eligibility_today.json every run (business
+instruction, 2026-09-02: "lets daily check would auto-enroll today") -- one
+row per campaign listing every candidate this script's OWN eligibility rule
+(real stock + 55% price floor) would enroll that day, resolved to
+offer_id/name/price for readability. This is a report of what THIS script
+enrolls, separate from Ozon's own algorithmic auto-add mechanism (Elastic
+Boosting's auto_add_dates etc.) -- that mechanism has no API visibility at
+all (confirmed 2026-09-02: Ozon selects and schedules its own candidates
+for a future date, e.g. "24 products, auto-adding 11 Sept 2026", with no
+endpoint to read which specific products) and is NOT what this report
+covers.
 """
+import json
 import sys
+from datetime import date
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -55,6 +68,7 @@ load_dotenv()
 
 MIN_PRICE_FRACTION = 0.55  # business floor: action_price >= 0.55 * price
 BATCH_SIZE = 100  # /v1/actions/products/activate's practical batch size
+DAILY_REPORT_FILE = "campaign_eligibility_today.json"
 
 
 def _get(method_path, params=None):
@@ -132,6 +146,7 @@ def main():
     print(f"{len(campaigns)} campaign(s) available on this account.\n")
 
     total_enrolled, total_skipped, total_rejected = 0, 0, 0
+    daily_report = {"date": date.today().isoformat(), "campaigns": []}
 
     for campaign in campaigns:
         action_id = campaign["id"]
@@ -153,6 +168,30 @@ def main():
         print(f"  {len(enrollments)} eligible for enrollment (real stock + price >= 55% floor), "
               f"{skipped} skipped (no stock or price floor violated).")
 
+        # Resolve names for anything eligible TODAY, for the daily report --
+        # business instruction (2026-09-02): "lets daily check would
+        # auto-enroll today". This is a read-only report of what THIS
+        # script would enroll on its own eligibility rule (real stock +
+        # 55% price floor) -- separate from Ozon's own algorithmic
+        # auto_add_dates mechanism (Elastic Boosting etc.), which has no
+        # API visibility at all (confirmed 2026-09-02) and is not what this
+        # reports.
+        eligible_products = []
+        if enrollments:
+            product_ids = [pid for pid, _, _ in enrollments]
+            names_by_id = {}
+            for i in range(0, len(product_ids), 1000):
+                batch = product_ids[i:i + 1000]
+                info = call("/v3/product/info/list", {"product_id": batch})
+                for item in info.get("result", {}).get("items", []):
+                    names_by_id[item["id"]] = (item.get("offer_id"), item.get("name"))
+            for pid, price, stock in enrollments:
+                offer_id, name = names_by_id.get(pid, (None, None))
+                eligible_products.append({
+                    "product_id": pid, "offer_id": offer_id, "name": name,
+                    "enrollment_price": price, "stock": stock,
+                })
+
         if enrollments:
             succeeded, rejected = enroll_products(action_id, enrollments)
             print(f"  -> {len(succeeded)} enrolled, {len(rejected)} rejected by Ozon.")
@@ -162,7 +201,19 @@ def main():
             total_rejected += len(rejected)
 
         total_skipped += skipped
+        daily_report["campaigns"].append({
+            "action_id": action_id,
+            "title": campaign.get("title", ""),
+            "candidate_count": len(candidates),
+            "eligible_today": eligible_products,
+        })
         print()
+
+    with open(DAILY_REPORT_FILE, "w", encoding="utf-8") as f:
+        json.dump(daily_report, f, ensure_ascii=False, indent=2)
+    total_eligible = sum(len(c["eligible_today"]) for c in daily_report["campaigns"])
+    print(f"Daily eligibility report ({total_eligible} product(s) eligible today across all campaigns) "
+          f"saved to {DAILY_REPORT_FILE}.\n")
 
     print(f"Done. {total_enrolled} product(s) newly enrolled across {len(campaigns)} campaign(s), "
           f"{total_skipped} skipped (no stock / price floor), {total_rejected} rejected by Ozon.")
