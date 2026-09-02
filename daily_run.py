@@ -16,6 +16,8 @@ Scheduler once a day. Runs, in order:
      URL, whether or not this pipeline crawled them today (refresh_live_stock.py).
   7b. Sweep any in-stock, eligible product into its active Ozon campaign(s)
      (enroll_campaigns.py).
+  7c. Detect (log-only for now) any campaign product Ozon added
+     automatically rather than through 7b (check_auto_added_campaign_products.py).
   8. Log to TASKS.md, commit & push.
 
 Each step is a subprocess call to the existing, already-working scripts. This
@@ -263,6 +265,22 @@ def main():
     elif "Done." in campaign_output:
         done_line = next((l for l in campaign_output.splitlines() if l.startswith("Done.")), "")
         counts["campaign_summary"] = done_line
+
+    # 7c. Detect (log-only, does not remove yet -- see module docstring)
+    # any campaign-enrolled product Ozon added automatically rather than
+    # through our own enroll_campaigns.py (business instruction,
+    # 2026-09-02: "if any product automatically is found remove these from
+    # the campaign and log it"). Not a hard failure either way.
+    ok, auto_added_output = run_step(
+        "Auto-added campaign product check (check_auto_added_campaign_products.py)",
+        ["check_auto_added_campaign_products.py"], timeout=900)
+    if not ok:
+        attention.append("Auto-added campaign product check failed — see log for details.")
+    elif "Done." in auto_added_output:
+        done_line = next((l for l in auto_added_output.splitlines() if l.startswith("Done.")), "")
+        counts["auto_added_check_summary"] = done_line
+        if "ALERT:" in auto_added_output:
+            attention.append(f"Auto-added campaign products detected (not yet removed, see module docstring): {done_line}")
 
     # 8. Update TASKS.md
     summary = (
