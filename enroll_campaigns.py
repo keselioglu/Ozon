@@ -1,33 +1,31 @@
 """
-Enrolls eligible, in-stock products into Ozon's promotional campaigns
-(GitHub issue #10, business instruction 2026-08-27: "Frequently add
-products to Ozon campaigns with prices min 55% of price when created").
+Enrolls eligible, in-stock, healthy-margin products into Ozon's promotional
+campaigns (GitHub issue #10, business instruction 2026-08-27; margin rule
+replaced 2026-09-02).
 
-Confirmed live (2026-08-27) via GET /v1/actions: this account currently
-participates in 3 active campaigns (Эластичный бустинг, Максимальный
-бустинг, Распродажа летнего). All three campaigns' "candidates" (products
-eligible but not yet enrolled) showed 0 stock across the board when first
-checked -- meaning real sellable inventory already appeared fully enrolled
-at that point. This script is meant to run recurringly (wired into
-daily_run.py) so any NEWLY uploaded/restocked product that becomes an
-eligible candidate gets swept into its campaign(s) automatically going
-forward, rather than needing another one-off backlog run.
+Margin rule (business instruction, 2026-09-02, superseding the original
+55%-of-list-price floor): a candidate qualifies only if M&S's current cost
+is <= 46% of the price it would be enrolled at (see margin_pricing.py).
+The original 55%-of-Ozon-list-price rule is retired -- the 46%-of-M&S-cost
+rule is the sole margin gate now (business decision, 2026-09-02: "retire
+the 55% rule, use only 46% M&S-cost").
 
-Price rule (business + platform, both enforced): the campaign price must be
->= 55% of the product's regular price (business floor) AND <=
-max_action_price (Ozon's own per-product ceiling for this campaign,
-returned by /v1/actions/candidates -- confirmed live that Ozon's own
-suggested elastic-pricing floor is already well above 55% in practice, so
-the business's 55% rule is a safety floor that will rarely bind, not the
-day-to-day operative constraint). A candidate whose max_action_price would
-require going below the 55% floor is skipped rather than force-priced below
-it.
+For Elastic Boosting (which offers a PRICE RANGE per candidate, not one
+fixed price -- price_min_elastic/price_max_elastic): try enrolling at
+price_max_elastic (the deepest discount) first; if that fails the 46% test,
+retry at price_min_elastic (the shallowest discount, closer to list price);
+skip entirely if both fail. This mirrors the reasoning validated manually
+2026-09-02: ratio_vs_max is always >= ratio_vs_min (max_elastic is always
+the lower price, so dividing the same M&S cost by it always gives an
+equal-or-larger ratio) -- so checking max first and falling back to min is
+the only useful order; checking min first and falling back to max can never
+find anything max didn't already accept.
 
-Enrollment price chosen: max_action_price itself (the largest discount
-Ozon will accept for this product in this campaign) UNLESS that violates
-the 55% floor, in which case the candidate is skipped -- simplest rule that
-satisfies "frequently add products... with prices min 55%" without
-inventing an arbitrary intermediate discount depth.
+Stock: uses REAL stock (RFBS via /v4/product/info/stocks), not the stock
+field returned by /v1/actions/candidates itself -- that field reads 0 for
+this account's entire real inventory (confirmed live 2026-09-02: candidates
+showing stock=0 turned out to have real stock as high as 100+ units). See
+margin_pricing.get_real_stock.
 
 Endpoints (community-corroborated against Go/Python Ozon API client
 libraries, then verified live on this account, 2026-08-27):
@@ -35,19 +33,19 @@ libraries, then verified live on this account, 2026-08-27):
   POST /v1/actions/candidates           -- list eligible-not-yet-enrolled products
   POST /v1/actions/products/activate    -- enroll products at a chosen price
 
-Wired into daily_run.py as its own step (runs after live stock refresh).
+Wired into daily_run.py as its own step (runs after refresh_prices.py, so
+today's M&S prices are already loaded, and after refresh_live_stock.py).
 
 Also writes campaign_eligibility_today.json every run (business
 instruction, 2026-09-02: "lets daily check would auto-enroll today") -- one
 row per campaign listing every candidate this script's OWN eligibility rule
-(real stock + 55% price floor) would enroll that day, resolved to
+(real stock + 46% M&S-cost margin) would enroll that day, resolved to
 offer_id/name/price for readability. This is a report of what THIS script
 enrolls, separate from Ozon's own algorithmic auto-add mechanism (Elastic
 Boosting's auto_add_dates etc.) -- that mechanism has no API visibility at
 all (confirmed 2026-09-02: Ozon selects and schedules its own candidates
-for a future date, e.g. "24 products, auto-adding 11 Sept 2026", with no
-endpoint to read which specific products) and is NOT what this report
-covers.
+for a future date, with no endpoint to read which specific products) and is
+NOT what this report covers.
 """
 import json
 import sys
@@ -62,11 +60,18 @@ import os
 import requests
 from dotenv import load_dotenv
 
+from margin_pricing import (
+    compute_ratio_pct,
+    fetch_usd_try_rate,
+    get_real_stock,
+    load_ms_prices,
+    qualifies,
+    resolve_offer_ids_and_names,
+)
 from ozon_client import call
 
 load_dotenv()
 
-MIN_PRICE_FRACTION = 0.55  # business floor: action_price >= 0.55 * price
 BATCH_SIZE = 100  # /v1/actions/products/activate's practical batch size
 DAILY_REPORT_FILE = "campaign_eligibility_today.json"
 
@@ -103,23 +108,40 @@ def list_candidates(action_id):
     return products
 
 
-def choose_enrollment_price(candidate):
-    """Returns the action_price to enroll at, or None if this candidate
-    should be skipped (no real stock, or every viable price would violate
-    the 55% floor)."""
-    if candidate.get("stock", 0) <= 0:
+def choose_enrollment(candidate, offer_id, real_stock, ms_prices, usd_try_rate):
+    """Returns {"price": ..., "ratio_pct": ...} for the price this
+    candidate should be enrolled at, or None if it should be skipped (no
+    real stock, no resolvable M&S price, or every viable price exceeds the
+    46% margin threshold).
+
+    Elastic Boosting candidates carry price_min_elastic/price_max_elastic
+    instead of a single max_action_price -- try the deeper (max_elastic)
+    discount first, fall back to the shallower (min_elastic) one. Maximum
+    Boosting / Summer Sale candidates only ever have max_action_price."""
+    if real_stock <= 0:
         return None
 
-    price = candidate.get("price", 0)
+    ms_entry = ms_prices.get(offer_id)
+    if not ms_entry:
+        return None
+    ms_price_try, _url = ms_entry
+
+    price_max_elastic = candidate.get("price_max_elastic")
+    price_min_elastic = candidate.get("price_min_elastic")
+    if price_max_elastic and price_min_elastic:
+        for price in (price_max_elastic, price_min_elastic):
+            ratio = compute_ratio_pct(ms_price_try, price, usd_try_rate)
+            if qualifies(ratio):
+                return {"price": price, "ratio_pct": round(ratio, 1)}
+        return None
+
     max_action_price = candidate.get("max_action_price", 0)
-    if not price or not max_action_price:
+    if not max_action_price:
         return None
-
-    floor = price * MIN_PRICE_FRACTION
-    if max_action_price < floor:
-        return None
-
-    return max_action_price
+    ratio = compute_ratio_pct(ms_price_try, max_action_price, usd_try_rate)
+    if qualifies(ratio):
+        return {"price": max_action_price, "ratio_pct": round(ratio, 1)}
+    return None
 
 
 def enroll_products(action_id, enrollments):
@@ -142,6 +164,12 @@ def enroll_products(action_id, enrollments):
 
 
 def main():
+    usd_try_rate = fetch_usd_try_rate()
+    print(f"Live USD/TRY rate: {usd_try_rate}\n")
+
+    ms_prices = load_ms_prices()
+    print(f"{len(ms_prices)} offer_id(s) with a known M&S price today.\n")
+
     campaigns = list_active_campaigns()
     print(f"{len(campaigns)} campaign(s) available on this account.\n")
 
@@ -156,41 +184,34 @@ def main():
         candidates = list_candidates(action_id)
         print(f"  {len(candidates)} candidate(s) not yet enrolled.")
 
+        product_ids = [c["id"] for c in candidates]
+        info_by_pid = resolve_offer_ids_and_names(product_ids)
+        offer_ids = [info[0] for info in info_by_pid.values() if info[0]]
+        real_stock_by_offer = get_real_stock(offer_ids)
+
         enrollments = []
+        eligible_products = []
         skipped = 0
         for c in candidates:
-            enrollment_price = choose_enrollment_price(c)
-            if enrollment_price is None:
+            pid = c["id"]
+            offer_id, name = info_by_pid.get(pid, (None, None))
+            if not offer_id:
                 skipped += 1
                 continue
-            enrollments.append((c["id"], enrollment_price, c.get("stock", 0)))
+            real_stock = real_stock_by_offer.get(offer_id, 0)
+            choice = choose_enrollment(c, offer_id, real_stock, ms_prices, usd_try_rate)
+            if choice is None:
+                skipped += 1
+                continue
+            enrollments.append((pid, choice["price"], real_stock))
+            eligible_products.append({
+                "product_id": pid, "offer_id": offer_id, "name": name,
+                "enrollment_price": choice["price"], "stock": real_stock,
+                "ms_ratio_pct": choice["ratio_pct"],
+            })
 
-        print(f"  {len(enrollments)} eligible for enrollment (real stock + price >= 55% floor), "
-              f"{skipped} skipped (no stock or price floor violated).")
-
-        # Resolve names for anything eligible TODAY, for the daily report --
-        # business instruction (2026-09-02): "lets daily check would
-        # auto-enroll today". This is a read-only report of what THIS
-        # script would enroll on its own eligibility rule (real stock +
-        # 55% price floor) -- separate from Ozon's own algorithmic
-        # auto_add_dates mechanism (Elastic Boosting etc.), which has no
-        # API visibility at all (confirmed 2026-09-02) and is not what this
-        # reports.
-        eligible_products = []
-        if enrollments:
-            product_ids = [pid for pid, _, _ in enrollments]
-            names_by_id = {}
-            for i in range(0, len(product_ids), 1000):
-                batch = product_ids[i:i + 1000]
-                info = call("/v3/product/info/list", {"product_id": batch})
-                for item in info.get("result", {}).get("items", []):
-                    names_by_id[item["id"]] = (item.get("offer_id"), item.get("name"))
-            for pid, price, stock in enrollments:
-                offer_id, name = names_by_id.get(pid, (None, None))
-                eligible_products.append({
-                    "product_id": pid, "offer_id": offer_id, "name": name,
-                    "enrollment_price": price, "stock": stock,
-                })
+        print(f"  {len(enrollments)} eligible for enrollment (real stock + M&S cost <= 46% of price), "
+              f"{skipped} skipped (no stock / no M&S price / margin too thin).")
 
         if enrollments:
             succeeded, rejected = enroll_products(action_id, enrollments)
@@ -216,7 +237,8 @@ def main():
           f"saved to {DAILY_REPORT_FILE}.\n")
 
     print(f"Done. {total_enrolled} product(s) newly enrolled across {len(campaigns)} campaign(s), "
-          f"{total_skipped} skipped (no stock / price floor), {total_rejected} rejected by Ozon.")
+          f"{total_skipped} skipped (no stock / no M&S price / margin too thin), "
+          f"{total_rejected} rejected by Ozon.")
 
 
 if __name__ == "__main__":

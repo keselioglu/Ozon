@@ -18,8 +18,14 @@ Scheduler once a day. Runs, in order:
      (refresh_prices.py) -- business instruction, 2026-09-02: "do we have a
      data of updated prices on marks&spencer daily? yes build it and update
      it daily". Tracking-only: does not push anything to Ozon.
-  7b. Sweep any in-stock, eligible product into its active Ozon campaign(s)
-     (enroll_campaigns.py).
+  7b. Sweep any in-stock, healthy-margin (M&S cost <= 46% of enrollment
+     price) product into its active Ozon campaign(s) (enroll_campaigns.py).
+  7b.5. Re-check every currently-enrolled campaign product's ACTUAL live
+     price (Elastic Boosting's current_boost drifts after enrollment) and
+     remove/re-home anything that's drifted above the 46% margin threshold
+     (rescan_campaign_margins.py).
+  7b.6. Read-only catalog-wide margin report covering every live in-stock
+     product, campaign or not (catalog_margin_report.py).
   7c. Detect (log-only for now) any campaign product Ozon added
      automatically rather than through 7b (check_auto_added_campaign_products.py).
   8. Log to TASKS.md, commit & push.
@@ -315,6 +321,40 @@ def main():
         done_line = next((l for l in campaign_output.splitlines() if l.startswith("Done.")), "")
         counts["campaign_summary"] = done_line
 
+    # 7b.5. Re-check every CURRENTLY ENROLLED campaign product's actual live
+    # price (not just its enrollment-time reference) against today's M&S
+    # cost, since Elastic Boosting's current_boost drifts continuously
+    # after enrollment (business instruction, 2026-09-02, after finding 288
+    # products had drifted past the 46% threshold live). Removes anything
+    # that's drifted thin, then tries to re-home each removal into another
+    # qualifying campaign before giving up on it. Not a hard failure either way.
+    ok, rescan_output = run_step(
+        "Campaign margin re-scan (rescan_campaign_margins.py)",
+        ["rescan_campaign_margins.py"], timeout=1800)
+    if not ok:
+        attention.append("Campaign margin re-scan step failed — see log for details.")
+    elif "Done." in rescan_output:
+        done_line = next((l for l in rescan_output.splitlines() if l.startswith("Done.")), "")
+        counts["margin_rescan_summary"] = done_line
+        if not done_line.startswith("Done. 0 removed"):
+            attention.append(f"Campaign margin drift found and corrected: {done_line}")
+
+    # 7b.6. Read-only catalog-wide margin visibility report -- covers every
+    # live, in-stock product regardless of campaign enrollment (business
+    # instruction, 2026-09-02: "check all live products with stock if the
+    # cost is higher than 46% even not in a campaign and report"). Nothing
+    # is changed here -- this pipeline doesn't push price changes to Ozon.
+    ok, catalog_output = run_step(
+        "Catalog-wide margin report (catalog_margin_report.py)",
+        ["catalog_margin_report.py"], timeout=3600)
+    if not ok:
+        attention.append("Catalog margin report step failed — see log for details.")
+    elif "Done." in catalog_output:
+        done_line = next((l for l in catalog_output.splitlines() if l.startswith("Done.")), "")
+        counts["catalog_margin_summary"] = done_line
+        if not done_line.rstrip(".").endswith("0 flagged (ratio > 46%)"):
+            attention.append(f"Catalog-wide margin risk found (report only, not acted on): {done_line}")
+
     # 7c. Detect (log-only, does not remove yet -- see module docstring)
     # any campaign-enrolled product Ozon added automatically rather than
     # through our own enroll_campaigns.py (business instruction,
@@ -340,7 +380,9 @@ def main():
         f"{counts.get('stock_summary', 'stock sync status unknown')}, "
         f"{counts.get('live_stock_summary', 'live stock refresh status unknown')}, "
         f"{counts.get('price_summary', 'price refresh status unknown')}, "
-        f"{counts.get('campaign_summary', 'campaign enrollment status unknown')}"
+        f"{counts.get('campaign_summary', 'campaign enrollment status unknown')}, "
+        f"{counts.get('margin_rescan_summary', 'margin re-scan status unknown')}, "
+        f"{counts.get('catalog_margin_summary', 'catalog margin report status unknown')}"
     )
     update_tasks_md(summary)
     git_commit_and_push(f"Daily run log: {TODAY}")

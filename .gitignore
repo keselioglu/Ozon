@@ -9,6 +9,8 @@ new_items_submitted.json
 campaign_eligibility_today.json
 price_history.jsonl
 price_changes_today.json
+margin_risk_removals.jsonl
+catalog_margin_risk_today.json
 category_processed_log.txt
 processed_log.txt
 failed_urls.txt
