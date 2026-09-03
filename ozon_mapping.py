@@ -189,14 +189,50 @@ def map_size_to_ozon(size_label):
     return value_id, ru_size, None
 
 
+def is_letter_only_size_label(size_label):
+    """True when M&S's own label is letter-to-letter, e.g. 'M (UK M)' —
+    NOT a numeric UK size in parentheses (e.g. 'M (UK 12)', which DOES have
+    a real EU equivalent via the letter->EU chart). Confirmed live,
+    2026-09-03 (business report on MS-T14002558F-BLUEMIX-*): M&S shows some
+    products with no numeric size at all anywhere on the page (label exactly
+    'M (UK M)', 'L (UK L)', etc.) -- for these there is no real EU number to
+    convert to, and fabricating one via LETTER_TO_EU_SIZE produced a wrong
+    offer_id size (e.g. '-42' for a product M&S only ever calls 'M'),
+    confirmed against products.csv: 296 distinct articles / 3,566 size rows
+    use this exact pattern, not a rare edge case."""
+    if not size_label:
+        return False
+    letter = extract_letter_size(size_label)
+    if not letter:
+        return False
+    return bool(re.fullmatch(rf"{letter}\s*\(UK\s*{letter}\)", size_label.strip()))
+
+
 def map_size_to_eu(size_label):
-    """Returns (eu_size_str, warning_or_None) — the EU number embedded in every
-    offer_id on this account (confirmed against live MAR-/SML-/MARKS-/MARK-
-    listings, e.g. 'UK 12' -> offer_id ends '-40', not the RU value '-46').
-    Tries the label's own leading EU number first (most direct and always
-    correct when present); falls back to the UK->EU or letter->EU chart only
-    when the label omits its leading number, matching the business's confirmed
-    size chart (2026-08-26)."""
+    """Returns (eu_size_str, warning_or_None) — the EU number (or, for
+    genuinely letter-only products, the letter itself) embedded in every
+    offer_id on this account.
+
+    Order matters and is deliberate:
+      1. Letter-only label ('M (UK M)') -> the letter verbatim. M&S shows NO
+         numeric size anywhere on the page for these -- there is nothing to
+         convert to, so the offer_id must use 'M', not a fabricated EU
+         number (business-confirmed, 2026-09-03; see
+         is_letter_only_size_label docstring). Checked FIRST, before the
+         leading-number extraction below, since a letter-only label has no
+         leading number to find anyway, but ordering this first keeps the
+         intent explicit rather than relying on that being a no-op.
+      2. The label's own leading EU number ('40 (UK 12)' -> '40') — most
+         direct and always correct when present.
+      3. UK->EU chart, for labels that give a numeric UK size but omit the
+         leading EU number.
+      4. Letter->EU chart, for labels like 'S (UK 6)' -- a LETTER size that
+         nonetheless has a real numeric UK equivalent in the parentheses,
+         unlike case 1's letter-to-letter labels.
+    Matches the business's confirmed size chart (2026-08-26) for cases 3/4."""
+    if is_letter_only_size_label(size_label):
+        return extract_letter_size(size_label), None
+
     eu_from_label = extract_eu_size(size_label)
     if eu_from_label:
         return eu_from_label, None
