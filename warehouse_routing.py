@@ -154,15 +154,29 @@ def build_routed_stock_updates(offer_id_to_stock):
 
 
 def save_warehouse_assignments(updates):
-    """Persists the CURRENT (non-zero-stock) warehouse assignment per
-    offer_id from this run's routing decisions, overwriting the prior
-    state -- this file always reflects "as of the last routing run," not a
-    history (the daily report is responsible for snapshotting counts from
-    this into its own dated history)."""
-    assignments = {}
+    """MERGES this run's routing decisions into the persisted state --
+    updates only the offer_ids this run actually evaluated, leaving every
+    other previously-known offer_id's assignment untouched.
+
+    This MUST merge, not overwrite: build_routed_stock_updates() is called
+    from multiple places that each cover a different SUBSET of the catalog
+    (update_stocks.py: only today's newly crawled/uploaded rows;
+    refresh_live_stock.py: the full known-URL catalog; check_todays_stock.py
+    at 6am: only today's newly submitted offer_ids). Confirmed live,
+    2026-09-03: an overwrite here silently collapsed the tracked count from
+    3,219 (after the 4am/5am full-catalog run) down to 249 (the 6am run's
+    much smaller today-only subset), making the daily report's warehouse
+    counts wrong for anything not touched that specific day."""
+    try:
+        with open(WAREHOUSE_STATE_FILE, encoding="utf-8") as f:
+            assignments = json.load(f)
+    except FileNotFoundError:
+        assignments = {}
+
     for u in updates:
         if u["stock"] > 0:
             assignments[u["offer_id"]] = u["warehouse_id"]
+
     with open(WAREHOUSE_STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(assignments, f, ensure_ascii=False, indent=2)
 
