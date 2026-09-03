@@ -116,6 +116,19 @@ def color_token(color):
 
 
 def main():
+    # Business instruction (2026-09-03): "if a product has 5-7 photos
+    # complete it to 8" -- scoped run, not every under-8 product (that's
+    # still the general logic below, just gated by this range for now).
+    min_photos = 0
+    max_photos = TARGET_PHOTO_COUNT - 1
+    for arg in sys.argv[1:]:
+        if arg.startswith("--min-photos="):
+            min_photos = int(arg.split("=", 1)[1])
+        elif arg.startswith("--max-photos="):
+            max_photos = int(arg.split("=", 1)[1])
+    if min_photos or max_photos != TARGET_PHOTO_COUNT - 1:
+        print(f"Scoped to products with {min_photos}-{max_photos} real photo(s).\n")
+
     try:
         df = pd.read_csv(PRODUCTS_CSV, encoding="utf-8-sig")
     except FileNotFoundError:
@@ -143,6 +156,8 @@ def main():
         image_urls = [u.strip() for u in str(row.get("image_urls") or "").split("|") if u.strip()]
         real_count = len(image_urls)
         if real_count >= TARGET_PHOTO_COUNT:
+            continue
+        if not (min_photos <= real_count <= max_photos):
             continue
 
         folder_key = f"{article_code}_{color_token(color)}"

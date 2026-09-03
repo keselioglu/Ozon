@@ -26,6 +26,7 @@ category_tree_top.txt
 colors_dictionary.txt
 daily_run_*.log
 generated_photos/
+extra_photos_push_log.jsonl
 generated_size_charts/
 generated_videos/
 __pycache__/
