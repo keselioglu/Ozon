@@ -17,6 +17,7 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+from color_dedup import classify_english_color, is_clearly_different_color, offer_id_color_families
 from ozon_client import call
 from ozon_mapping import (
     ATTR_BRAND, ATTR_COLOR, ATTR_GENDER, ATTR_SIZE, ATTR_TYPE, BRAND_MARKS_AND_SPENCER_ID,
@@ -248,6 +249,67 @@ def fetch_live_article_codes_by_prefix():
     return codes_to_prefixes
 
 
+def fetch_live_offer_ids_by_article():
+    """Returns {article_code: [live_offer_id, ...]} for every live offer_id
+    on the account, regardless of naming convention (business report,
+    2026-09-03: duplicate listings created because legacy offer_ids use
+    Turkish color words -- e.g. MS-T14002558F-MAVI-M -- while this
+    pipeline's own uploads use whatever specific English color M&S's page
+    exposes -- e.g. MS-T14002558F-BLUEMIX-42 -- and both share the "MS-"
+    prefix, so fetch_live_article_codes_by_prefix()'s prefix-only check
+    never catches this case). Used by is_color_duplicate_risk() to compare
+    a new upload's color against every already-live color for the same
+    article, regardless of which naming convention either one uses."""
+    codes_to_offer_ids = {}
+    cursor = ""
+    while True:
+        params = {"filter": {}, "limit": 1000}
+        if cursor:
+            params["last_id"] = cursor
+        result = call("/v3/product/list", params)
+        page = result.get("result", {})
+        items = page.get("items", [])
+        for item in items:
+            oid = item.get("offer_id", "")
+            code = extract_article_code_from_offer_id(oid)
+            if code:
+                codes_to_offer_ids.setdefault(code, []).append(oid)
+        cursor = page.get("last_id")
+        if not cursor or not items:
+            break
+    return codes_to_offer_ids
+
+
+def is_color_duplicate_risk(article_code, new_color, live_offer_ids_by_article):
+    """True if uploading `new_color` for `article_code` might duplicate an
+    already-live listing under a DIFFERENT color-naming convention
+    (Turkish legacy vs. this pipeline's English) -- business instruction,
+    2026-09-03: "not creating duplicate is much more important" than
+    letting every legitimately-different color through, so this is
+    deliberately biased toward returning True (risk) whenever uncertain.
+
+    Only returns False (safe to upload) when every already-live offer_id
+    for this article either has no recognized color token at all, or has
+    a color whose possible family set is CLEARLY disjoint from
+    new_color's family set (e.g. white vs. black) -- see
+    color_dedup.is_clearly_different_color."""
+    live_offer_ids = live_offer_ids_by_article.get(article_code, [])
+    if not live_offer_ids:
+        return False
+
+    new_families = classify_english_color(new_color)
+    for oid in live_offer_ids:
+        existing_families = offer_id_color_families(oid)
+        if not existing_families:
+            # Can't identify the existing listing's color at all (unknown
+            # Turkish token, or an English color not in our keyword list)
+            # -- treat as a risk rather than assume it's safe.
+            return True
+        if not is_clearly_different_color(new_families, existing_families):
+            return True
+    return False
+
+
 def load_deferred_items():
     try:
         with open(DEFERRED_LOG, "r", encoding="utf-8") as f:
@@ -274,6 +336,9 @@ def main():
     live_article_codes = fetch_live_article_codes_by_prefix()
     print(f"{len(live_article_codes)} distinct M&S article code(s) found live across the whole account.\n")
 
+    print("Checking live catalog for a possible color-naming duplicate (Turkish vs. English)...")
+    live_offer_ids_by_article = fetch_live_offer_ids_by_article()
+
     items = []
     skipped = 0
     for _, row in df.iterrows():
@@ -285,6 +350,28 @@ def main():
                 f"Article {article_code} is already live under a different offer_id prefix "
                 f"({', '.join(sorted(live_prefixes - {'MS'}))}) — skipping to avoid a duplicate listing, "
                 "even though the color/size may differ."
+            )
+            with open(SKIPPED_LOG, "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "sku": row.get("variant_sku"), "name": row.get("name"),
+                    "reasons": [reason],
+                }, ensure_ascii=False) + "\n")
+            print(f"SKIP {row.get('variant_sku')} ({row.get('name')}): {reason}")
+            continue
+
+        # Business report, 2026-09-03: duplicate listings created because
+        # legacy offer_ids use Turkish color words (e.g. "MAVI") while this
+        # pipeline's uploads use whatever English color M&S's page exposes
+        # (e.g. "BLUEMIX") -- both share the "MS-" prefix, so the check
+        # above never catches this case. Bias toward skipping whenever the
+        # color match is uncertain (business decision, 2026-09-03: "not
+        # creating duplicate is much more important").
+        if is_color_duplicate_risk(article_code, row.get("color"), live_offer_ids_by_article):
+            skipped += 1
+            reason = (
+                f"Article {article_code} is already live with a color that may be the same as "
+                f"{row.get('color')!r} under a different naming convention (Turkish/English) — "
+                "skipping to avoid a possible duplicate listing."
             )
             with open(SKIPPED_LOG, "a", encoding="utf-8") as f:
                 f.write(json.dumps({
