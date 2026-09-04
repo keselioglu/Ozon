@@ -1,4 +1,4 @@
-Proprity,Section,Subsection,Category Name (TR),Full URL
+﻿Proprity,Section,Subsection,Category Name (TR),Full URL
 1,Lingerie,Panties,Külot,https://www.marksandspencer.com.tr/kadin-kulot/
 2,Lingerie,Panties,Yeni Gelen Külotlar,https://www.marksandspencer.com.tr/yeni-gelen-kulotlar/
 3,Lingerie,Panties,Paket Külotlar,https://www.marksandspencer.com.tr/kadin-paket-kulotlar/
@@ -27,7 +27,6 @@ Proprity,Section,Subsection,Category Name (TR),Full URL
 26,Men,Underwear & Intimate,Desenli Külotlar,https://www.marksandspencer.com.tr/erkek-desenli-kulotlar/
 27,Men,Underwear & Intimate,Düz Külotlar,https://www.marksandspencer.com.tr/erkek-duz-kulotlar/
 50,Summer Sale,Lingerie,Tümü,https://www.marksandspencer.com.tr/indirim-icgiyim/
-51,Summer Sale,Lingerie,Sütyen,https://www.marksandspencer.com.tr/indirim-sutyen/
 52,Summer Sale,Lingerie,Külot,https://www.marksandspencer.com.tr/indirim-kulot/
 53,Summer Sale,Lingerie,Uyku Koleksiyonları,https://www.marksandspencer.com.tr/indirim-uykukoleksiyonlari/
 54,Summer Sale,Lingerie,Atlet,https://www.marksandspencer.com.tr/indirim-atlet/
@@ -160,12 +159,6 @@ Proprity,Section,Subsection,Category Name (TR),Full URL
 250,Women,Collections,M&S Collection,https://www.marksandspencer.com.tr/kadin-m-s-collection/
 250,Women,Collections,Good Move,https://www.marksandspencer.com.tr/good-move/
 250,Women,Collections,AÇEV Ürünleri,https://www.marksandspencer.com.tr/acev-urunleri/
-250,Lingerie,Specialty Bras,Ameliyat Sütyeni,https://www.marksandspencer.com.tr/ameliyat-sutyeni/
-250,Lingerie,Specialty Bras,Emzirme Sütyeni,https://www.marksandspencer.com.tr/emzirme-sutyeni/
-250,Lingerie,Specialty Bras,İlk Sütyenim,https://www.marksandspencer.com.tr/genc-kiz-sutyen/
-250,Lingerie,Specialty Bras,Sporcu Sütyeni,https://www.marksandspencer.com.tr/sporcu-sutyeni/
-250,Lingerie,Specialty Bras,Küçültücü-Toparlayıcı Sütyen,https://www.marksandspencer.com.tr/kucultucu-toparlayici-sutyen/
-250,Lingerie,Specialty Bras,Büyük Beden Sütyenler,https://www.marksandspencer.com.tr/kadin-buyuk-beden-sutyenler/
 250,Lingerie,Hosiery,Çorap,https://www.marksandspencer.com.tr/kadin-corap/
 250,Lingerie,Hosiery,Günlük Çoraplar,https://www.marksandspencer.com.tr/kadin-gunluk-coraplar/
 250,Lingerie,Hosiery,Külotlu Çoraplar,https://www.marksandspencer.com.tr/kadin-kulotlu-coraplar/
@@ -385,18 +378,6 @@ Proprity,Section,Subsection,Category Name (TR),Full URL
 250,Cosmetics,Collections,Formula,https://www.marksandspencer.com.tr/formula/
 250,Cosmetics,Collections,Pure,https://www.marksandspencer.com.tr/pure/
 250,Cosmetics,Collections,Monte & Wilde,https://www.marksandspencer.com.tr/monte-wilde/
-400,Lingerie,Bras,Sütyen,https://www.marksandspencer.com.tr/sutyen/
-400,Lingerie,Bras,Yeni Gelen Sütyenler,https://www.marksandspencer.com.tr/yeni-gelen-sutyenler/
-400,Lingerie,Bras,Dantelli Sütyenler,https://www.marksandspencer.com.tr/kadin-dantelli-sutyenler/
-400,Lingerie,Bras,Destekli Sütyenler,https://www.marksandspencer.com.tr/kadin-destekli-sutyenler/
-400,Lingerie,Bras,Desteksiz Sütyen,https://www.marksandspencer.com.tr/kadin-desteksiz-sutyen/
-400,Lingerie,Bras,Balensiz Sütyen,https://www.marksandspencer.com.tr/kadin-balensiz-sutyen/
-400,Lingerie,Bras,Balenli Sütyenler,https://www.marksandspencer.com.tr/balenli-sutyenler/
-400,Lingerie,Bras,T-Shirt Sütyeni,https://www.marksandspencer.com.tr/tshirt-sutyeni/
-400,Lingerie,Bras,Bralet Sütyenler,https://www.marksandspencer.com.tr/bralet-sutyenler/
-400,Lingerie,Bras,Balkonet Sütyen,https://www.marksandspencer.com.tr/balkonet-sutyen/
-400,Lingerie,Bras,Straplez Sütyen,https://www.marksandspencer.com.tr/strapless-sutyen/
-400,Lingerie,Bras,Sütyen Aksesuarları,https://www.marksandspencer.com.tr/kadin-sutyen-aksesuarlari/
 500,Main,,Ev & Dekorasyon (Home & Decor),https://www.marksandspencer.com.tr/ev-dekorasyon-1/
 500,Summer Sale,Home,Ev Dekorasyon,https://www.marksandspencer.com.tr/indirim-evdekorasyon/
 500,Summer Sale,Home,Ev Aksesuarı & Tekstili,https://www.marksandspencer.com.tr/indirim-evaksesuar-tekstili/
