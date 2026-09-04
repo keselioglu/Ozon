@@ -15,10 +15,12 @@ A product only counts as "new" if neither its ms_article_code nor its
 parent_sku appears in any live MS-* offer_id on the account.
 
 Only category types the pipeline can actually map/translate are considered
-(kulot/külot/tanga -> underwear, atlet -> tank top, matching
-ozon_mapping.resolve_category_and_type). Any other category name in the
-priority file is skipped automatically without being crawled — no crawl
-requests are spent on categories nothing downstream can list.
+-- is_supported_category() delegates to ozon_mapping.is_known_product_type(),
+the SAME keyword groups resolve_category_and_type() itself uses to build
+the upload, so the two can't drift out of sync (they did, silently, for a
+while -- see is_supported_category()'s own docstring). Any other category
+name in the priority file is skipped automatically without being crawled —
+no crawl requests are spent on categories nothing downstream can list.
 """
 import sys
 
@@ -30,16 +32,21 @@ if sys.platform == "win32":
 
 from crawler import discover_category_products, load_line_set
 from ozon_client import call
+from ozon_mapping import is_known_product_type
 
 PRIORITY_FILE = "category_priority.csv"
 URLS_FILE = "product_urls.txt"
 
-_SUPPORTED_KEYWORDS = ("kulot", "külot", "tanga", "atlet")
-
 
 def is_supported_category(name):
-    lower = (name or "").lower()
-    return any(kw in lower for kw in _SUPPORTED_KEYWORDS)
+    """Delegates to ozon_mapping.is_known_product_type() -- MUST stay a
+    single source of truth with resolve_category_and_type()'s own keyword
+    groups. Confirmed live, 2026-09-04: this function used to hardcode its
+    own, much shorter keyword list that silently drifted out of sync with
+    resolve_category_and_type() every time a new product type was added
+    there (boxer/trunk/brief/slip/hipster/pijama/t-shirt), so discovery
+    kept skipping categories this pipeline could actually handle."""
+    return is_known_product_type(name)
 
 
 def load_priority_categories(path=PRIORITY_FILE):

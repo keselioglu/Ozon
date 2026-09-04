@@ -286,6 +286,35 @@ def map_color_to_ozon(mands_color):
     return None, None, f"No match found for color {mands_color!r} — needs a manual override"
 
 
+# Single source of truth for which M&S product-name keywords map to a known
+# Ozon category/type -- category_priority.py's is_supported_category() must
+# use the SAME keyword groups (via KNOWN_PRODUCT_TYPE_KEYWORDS below), not
+# its own separately-maintained list. Confirmed live, 2026-09-04: an
+# earlier version of category_priority.py hardcoded its own, much shorter
+# keyword list ("kulot", "külot", "tanga", "atlet" only) that was never
+# updated when boxer/trunk/brief/slip/hipster/pijama support was added
+# here, silently causing discovery to skip categories this pipeline could
+# actually translate and upload -- the drift was only caught when adding
+# t-shirt support and finding discovery still reported "0 categories
+# checked" for it.
+UNDERWEAR_KEYWORDS = ("kulot", "külot", "tanga", "boxer", "trunk", "brief", "slip", "hipster")
+TANK_TOP_KEYWORDS = ("atlet",)
+PAJAMA_KEYWORDS = ("pijama", "pyjama")
+TSHIRT_KEYWORDS = ("t-shirt", "tshirt", "tişört", "tisort")
+
+KNOWN_PRODUCT_TYPE_KEYWORDS = UNDERWEAR_KEYWORDS + TANK_TOP_KEYWORDS + PAJAMA_KEYWORDS + TSHIRT_KEYWORDS
+
+
+def is_known_product_type(name):
+    """True if `name` contains a keyword resolve_category_and_type() can
+    actually map to a category/type -- used by category_priority.py to
+    decide whether a category is worth crawling at all, so the two stay
+    in sync by construction rather than by two lists someone has to
+    remember to update together."""
+    lower = (name or "").lower()
+    return any(kw in lower for kw in KNOWN_PRODUCT_TYPE_KEYWORDS)
+
+
 def resolve_category_and_type(name, is_set_hint):
     """Determines (description_category_id, type_id) from the M&S product name.
     Keyword-based: 'kulot'/'külot'/'tanga'/'boxer'/'trunk'/'brief'/'slip'/
@@ -301,13 +330,13 @@ def resolve_category_and_type(name, is_set_hint):
     caller should skip rather than guess, since an unmapped category means
     unknown required fields."""
     lower = (name or "").lower()
-    if any(kw in lower for kw in ("kulot", "külot", "tanga", "boxer", "trunk", "brief", "slip", "hipster")):
+    if any(kw in lower for kw in UNDERWEAR_KEYWORDS):
         return CATEGORY_ID, (TYPE_ID_PANTIES_SET if is_set_hint else TYPE_ID_PANTIES)
-    if "atlet" in lower:
+    if any(kw in lower for kw in TANK_TOP_KEYWORDS):
         return CATEGORY_ID_CLOTHING, TYPE_ID_TANK_TOP
-    if "pijama" in lower or "pyjama" in lower:
+    if any(kw in lower for kw in PAJAMA_KEYWORDS):
         return CATEGORY_ID_CLOTHING, TYPE_ID_PAJAMA
-    if "t-shirt" in lower or "tshirt" in lower or "tişört" in lower or "tisort" in lower:
+    if any(kw in lower for kw in TSHIRT_KEYWORDS):
         return CATEGORY_ID_CLOTHING, TYPE_ID_TSHIRT
     return None, None
 
