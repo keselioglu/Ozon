@@ -32,4 +32,5 @@ generated_videos/
 __pycache__/
 *.pyc
 .venv/
+_temp_*
 sample_page*.html
