@@ -32,6 +32,11 @@ CATEGORY_ID_CLOTHING = 200000933
 TYPE_ID_TANK_TOP = 93150         # "Tank Top" — matches M&S "atlet"
 TYPE_ID_PAJAMA = 93176           # "Pajama" — matches M&S "pijama" (confirmed live, 2026-09-01:
                                  # same required-attribute set as tank top -- 9163/10096/31/4295/8292/8229)
+TYPE_ID_TSHIRT = 93244           # "T-Shirt" — matches M&S "t-shirt"/"tişört" (confirmed live,
+                                 # 2026-09-04: same required-attribute set as tank top/pajama,
+                                 # same RU size dictionary as existing clothing sizes -- added to
+                                 # give category discovery more categories to fill daily quota
+                                 # after every existing supported category was exhausted)
 
 ATTR_SIZE = 4295
 ATTR_GENDER = 9163
@@ -287,7 +292,11 @@ def resolve_category_and_type(name, is_set_hint):
     'hipster' = underwear (Ozon has no separate men's-underwear type --
     confirmed live, 2026-09-01: men's briefs use the exact same
     category/type as women's, just a different gender attribute value, see
-    resolve_gender), 'atlet' = tank top, 'pijama'/'pyjama' = pajama.
+    resolve_gender), 'atlet' = tank top, 'pijama'/'pyjama' = pajama,
+    't-shirt'/'tshirt'/'tişört' = t-shirt (added 2026-09-04, business
+    instruction to give category discovery more supported categories --
+    confirmed live: same required-attribute set and RU size dictionary as
+    tank top/pajama, no new mapping complications like bras had).
     Returns (None, None) if the product doesn't match a known category --
     caller should skip rather than guess, since an unmapped category means
     unknown required fields."""
@@ -298,6 +307,8 @@ def resolve_category_and_type(name, is_set_hint):
         return CATEGORY_ID_CLOTHING, TYPE_ID_TANK_TOP
     if "pijama" in lower or "pyjama" in lower:
         return CATEGORY_ID_CLOTHING, TYPE_ID_PAJAMA
+    if "t-shirt" in lower or "tshirt" in lower or "tişört" in lower or "tisort" in lower:
+        return CATEGORY_ID_CLOTHING, TYPE_ID_TSHIRT
     return None, None
 
 
