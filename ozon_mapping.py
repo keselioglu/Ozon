@@ -37,6 +37,16 @@ TYPE_ID_TSHIRT = 93244           # "T-Shirt" — matches M&S "t-shirt"/"tişört
                                  # same RU size dictionary as existing clothing sizes -- added to
                                  # give category discovery more categories to fill daily quota
                                  # after every existing supported category was exhausted)
+TYPE_ID_SOCKS = 93157            # "Socks" — matches M&S "çorap"/"corap" (added 2026-09-05: the
+                                 # single largest untranslated cluster, 94 distinct articles, once
+                                 # Ozon's quota jumped 250->2000. Same required-attribute set as
+                                 # every other type here, but sizing is genuinely different -- M&S
+                                 # gives shoe-size RANGES ("35.5-38 (UK 3-5)"), not one exact size,
+                                 # so the RU size ATTRIBUTE always resolves to "universal" (a real
+                                 # dictionary value, id 35646) for range-style labels rather than
+                                 # picking an arbitrary single number from the range. Plain letter
+                                 # labels (S/M/L/XL, also seen on real sock listings) still use the
+                                 # existing LETTER_TO_RU_SIZE chart, unaffected.
 
 ATTR_SIZE = 4295
 ATTR_GENDER = 9163
@@ -255,6 +265,54 @@ def map_size_to_eu(size_label):
     return None, f"Could not resolve an EU size from label {size_label!r}"
 
 
+RU_SIZE_UNIVERSAL_ID = 35646  # confirmed live, 2026-09-05, against the Socks (93157) size dictionary
+
+_SHOE_SIZE_RANGE_RE = re.compile(r"^\s*[\d.]+\+?\s*-\s*[\d.]+\+?")
+
+
+def is_shoe_size_range_label(size_label):
+    """True for M&S sock labels like '35.5-38 (UK 3-5)' or '43-47 (UK 9-12)'
+    -- a genuine RANGE of shoe sizes for one multi-pack, not one exact size.
+    False for plain letter labels (S/M/L/XL, also seen on real sock
+    listings, e.g. offer T60007575's 'S (UK S)') and for a single leading
+    number with no range (handled by the normal numeric-size path)."""
+    if not size_label:
+        return False
+    return bool(_SHOE_SIZE_RANGE_RE.match(size_label.strip()))
+
+
+def map_sock_size_to_ozon(size_label):
+    """Returns (dictionary_value_id, ru_size_str, warning_or_None) for the
+    Socks (93157) type specifically. A shoe-size RANGE label always maps to
+    Ozon's "universal" dictionary value (id 35646) -- confirmed live,
+    2026-09-05: a 5-pack marked "39.5-42.5" isn't one exact shoe size, so
+    picking either end of the range would misrepresent the product;
+    "universal" is a real, valid dictionary entry for exactly this case.
+    Falls back to the normal map_size_to_ozon() (letter/UK chart) for
+    plain letter-labeled socks, which some M&S sock listings use instead
+    of a shoe-size range."""
+    if is_shoe_size_range_label(size_label):
+        return RU_SIZE_UNIVERSAL_ID, "universal", None
+    return map_size_to_ozon(size_label)
+
+
+def map_sock_size_to_offer_id_token(size_label):
+    """Returns (token_str, warning_or_None) -- the size token embedded in a
+    sock offer_id. Since the Ozon size ATTRIBUTE always collapses to
+    "universal" for range labels (see map_sock_size_to_ozon), the raw range
+    itself must be preserved here instead, or every range-sized variant of
+    one color would collide on the same offer_id (business-confirmed
+    approach, 2026-09-05). Digits from BOTH ends of the range are kept
+    (periods and the leading UK-side parenthetical dropped) so
+    '35.5-38 (UK 3-5)' -> '355-38', distinct from '39.5-42 (UK 6-8)' ->
+    '395-42'. Plain letter labels fall back to map_size_to_eu() as usual."""
+    if is_shoe_size_range_label(size_label):
+        range_part = size_label.split("(")[0].strip()
+        token = range_part.replace(".", "").replace(" ", "")
+        return token, None
+    return map_size_to_eu(size_label)
+
+
 def map_color_to_ozon(mands_color):
     """Returns (dictionary_value_id, matched_ozon_value, warning_or_None).
     Uses manual overrides first, then closest-match fuzzy matching as a fallback."""
@@ -301,8 +359,11 @@ UNDERWEAR_KEYWORDS = ("kulot", "külot", "tanga", "boxer", "trunk", "brief", "sl
 TANK_TOP_KEYWORDS = ("atlet",)
 PAJAMA_KEYWORDS = ("pijama", "pyjama")
 TSHIRT_KEYWORDS = ("t-shirt", "tshirt", "tişört", "tisort")
+SOCKS_KEYWORDS = ("çorap", "corap")  # added 2026-09-05 -- see TYPE_ID_SOCKS
 
-KNOWN_PRODUCT_TYPE_KEYWORDS = UNDERWEAR_KEYWORDS + TANK_TOP_KEYWORDS + PAJAMA_KEYWORDS + TSHIRT_KEYWORDS
+KNOWN_PRODUCT_TYPE_KEYWORDS = (
+    UNDERWEAR_KEYWORDS + TANK_TOP_KEYWORDS + PAJAMA_KEYWORDS + TSHIRT_KEYWORDS + SOCKS_KEYWORDS
+)
 
 
 def is_known_product_type(name):
@@ -325,7 +386,11 @@ def resolve_category_and_type(name, is_set_hint):
     't-shirt'/'tshirt'/'tişört' = t-shirt (added 2026-09-04, business
     instruction to give category discovery more supported categories --
     confirmed live: same required-attribute set and RU size dictionary as
-    tank top/pajama, no new mapping complications like bras had).
+    tank top/pajama, no new mapping complications like bras had),
+    'çorap'/'corap' = socks (added 2026-09-05, the single largest
+    untranslated cluster at 94 articles -- see TYPE_ID_SOCKS and
+    map_sock_size_to_ozon/map_sock_size_to_offer_id_token for the
+    shoe-size-range handling this type needs that no other type does).
     Returns (None, None) if the product doesn't match a known category --
     caller should skip rather than guess, since an unmapped category means
     unknown required fields."""
@@ -338,7 +403,19 @@ def resolve_category_and_type(name, is_set_hint):
         return CATEGORY_ID_CLOTHING, TYPE_ID_PAJAMA
     if any(kw in lower for kw in TSHIRT_KEYWORDS):
         return CATEGORY_ID_CLOTHING, TYPE_ID_TSHIRT
+    if any(kw in lower for kw in SOCKS_KEYWORDS):
+        return CATEGORY_ID, TYPE_ID_SOCKS
     return None, None
+
+
+def is_socks(name):
+    """True if `name` matches the socks keyword group -- callers
+    (upload_to_ozon.py's size resolution) need to know this specifically,
+    since socks use a different size-mapping path
+    (map_sock_size_to_ozon/map_sock_size_to_offer_id_token) than every
+    other type here."""
+    lower = (name or "").lower()
+    return any(kw in lower for kw in SOCKS_KEYWORDS)
 
 
 def resolve_gender(url):

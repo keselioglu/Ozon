@@ -21,8 +21,9 @@ from color_dedup import classify_english_color, is_clearly_different_color, offe
 from ozon_client import call
 from ozon_mapping import (
     ATTR_BRAND, ATTR_COLOR, ATTR_GENDER, ATTR_SIZE, ATTR_TYPE, BRAND_MARKS_AND_SPENCER_ID,
-    CATEGORY_ID_CLOTHING, extract_article_code_from_offer_id, log_mapping_decision,
-    map_color_to_ozon, map_size_to_eu, map_size_to_ozon, resolve_category_and_type, resolve_gender,
+    CATEGORY_ID_CLOTHING, extract_article_code_from_offer_id, is_socks, log_mapping_decision,
+    map_color_to_ozon, map_size_to_eu, map_size_to_ozon, map_sock_size_to_offer_id_token,
+    map_sock_size_to_ozon, resolve_category_and_type, resolve_gender,
 )
 from ozon_translations import BRAND_PREFIX, COLLECTION_ID, WARRANTY_ID, get_translation
 
@@ -95,7 +96,18 @@ def build_ozon_item(row, offer_id_suffix=""):
     if pd.isna(stock_count) or int(stock_count) <= 0:
         return None, ["Zero/unknown stock — not pushed to Ozon."]
 
-    size_id, ru_size, size_warning = map_size_to_ozon(row.get("size_label"))
+    # Socks (added 2026-09-05) use a different size-mapping path -- M&S
+    # gives shoe-size RANGES ("35.5-38 (UK 3-5)"), not one exact size, so
+    # the RU attribute always resolves to "universal" and the offer_id
+    # token preserves the raw range instead of a single EU number. See
+    # ozon_mapping.map_sock_size_to_ozon/map_sock_size_to_offer_id_token.
+    if is_socks(row.get("name")):
+        size_id, ru_size, size_warning = map_sock_size_to_ozon(row.get("size_label"))
+        eu_size, eu_size_warning = map_sock_size_to_offer_id_token(row.get("size_label"))
+    else:
+        size_id, ru_size, size_warning = map_size_to_ozon(row.get("size_label"))
+        eu_size, eu_size_warning = map_size_to_eu(row.get("size_label"))
+
     if size_warning:
         warnings.append(f"size: {size_warning}")
     log_mapping_decision(MAPPING_LOG, article_code, "size", row.get("size_label"), ru_size, size_warning)
@@ -106,7 +118,6 @@ def build_ozon_item(row, offer_id_suffix=""):
     # was a real bug: it silently mislabeled every numeric-size product's SKU
     # with the wrong physical size (e.g. UK 6 uploaded as offer_id "...-40",
     # the EU number for UK 12 — confirmed on T61008800T, 2026-08-26).
-    eu_size, eu_size_warning = map_size_to_eu(row.get("size_label"))
     if eu_size_warning:
         warnings.append(f"eu_size: {eu_size_warning}")
     log_mapping_decision(MAPPING_LOG, article_code, "eu_size", row.get("size_label"), eu_size, eu_size_warning)
