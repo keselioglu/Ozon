@@ -382,12 +382,23 @@ KNOWN_PRODUCT_TYPE_KEYWORDS = (
 
 
 def is_top_word(name):
-    """True if `name` contains 'üst'/'ust' as a STANDALONE word (word
-    boundary on both sides) -- NOT as a substring, which would also match
-    inside 'üstü' ('Pijama Üstü' = pajama top, must resolve to Pajama, not
-    Top). Confirmed live, 2026-09-05: a naive `in` check matched both."""
+    """True if `name` contains 'üst'/'ust' as a standalone word OR its
+    possessive-suffixed form 'üstü'/'ustu' (Turkish "X üstü" = "the top of
+    X", e.g. "Ev Giyim Üstü" = "homewear top") -- but NOT as an arbitrary
+    substring inside an unrelated word (e.g. 'üstün'/'küstah', confirmed
+    live, 2026-09-05, must NOT match).
+
+    'üstü' is included deliberately even though 'Pijama Üstü' (pajama top)
+    also matches this pattern -- resolve_category_and_type() checks
+    PAJAMA_KEYWORDS before this check, so a real pajama-top name is
+    already resolved to Pajama by the time this would apply; excluding
+    'üstü' entirely (an earlier version of this function did) produced a
+    false NEGATIVE instead, silently failing to match legitimate non-pajama
+    tops like "Ev Giyim Üstü" that use the same suffix for an unrelated
+    reason (confirmed live: found while checking why that exact name
+    still didn't translate after Top support was added)."""
     lower = (name or "").lower()
-    return bool(re.search(r"(?<![a-zçğıöşü])(üst|ust)(?![a-zçğıöşü])", lower))
+    return bool(re.search(r"(?<![a-zçğıöşü])(üst|ust)(ü|u)?(?![a-zçğıöşü])", lower))
 
 
 def is_known_product_type(name):
