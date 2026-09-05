@@ -244,8 +244,14 @@ def main():
         restock_line = next((l for l in recheck_output.splitlines() if "now show real stock" in l), "")
         counts["restock_summary"] = restock_line
 
-    # 3. Auto-translate any new products
-    ok, translate_output = run_step("Auto-translate (auto_translate.py)", ["auto_translate.py"], timeout=1800)
+    # 3. Auto-translate any new products. Timeout raised from 30min to 3h,
+    # 2026-09-05: Ozon's daily_create quota jumped from 250 to 2000
+    # (account-level change) and auto_translate.py's sequential
+    # one-Claude-call-per-product loop timed out trying to translate a
+    # 1,118-product discovery batch under the old 30min limit, failing
+    # the whole day's run. auto_translate.py itself is unchanged --
+    # translation just genuinely takes longer at 8x the daily volume.
+    ok, translate_output = run_step("Auto-translate (auto_translate.py)", ["auto_translate.py"], timeout=10800)
     if not ok:
         log("Translate step failed — stopping run rather than uploading with an inconsistent translations file.")
         _finalize_failed_run("Auto-translate step failed — see log for details.")
