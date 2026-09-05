@@ -156,20 +156,27 @@ def _load_color_dict():
 
 
 def extract_uk_size(size_label):
-    """'34 (UK 6)' -> '6'. Returns None if no numeric UK size found."""
+    """'34 (UK 6)' -> '6', '42 (UK 14REG)' -> '14'. The optional trailing
+    "REG" (confirmed live, 2026-09-05: a fit qualifier for "Regular fit",
+    seen on 158 distinct t-shirt/top articles, e.g. "42 (UK 14REG)" and
+    "XL (UK XLREG) - Regular") is a suffix on the size code itself, not a
+    separate token -- stripped here rather than requiring a word boundary
+    right after the digits, which would otherwise fail to match at all.
+    Returns None if no numeric UK size found."""
     if not size_label:
         return None
     import re
-    m = re.search(r"UK\s*(\d+)", size_label)
+    m = re.search(r"UK\s*(\d+)(?:REG)?\b", size_label)
     return m.group(1) if m else None
 
 
 def extract_letter_size(size_label):
-    """'S (UK S)' -> 'S'. Returns None if no letter size found."""
+    """'S (UK S)' -> 'S', 'S (UK SREG)' -> 'S'. Same "REG" fit-qualifier
+    suffix as extract_uk_size -- see that function's docstring."""
     if not size_label:
         return None
     import re
-    m = re.search(r"UK\s*(XXS|XXL|XS|S|M|L|XL|3XL|4XL|5XL)\b", size_label)
+    m = re.search(r"UK\s*(XXS|XXL|XS|S|M|L|XL|3XL|4XL|5XL)(?:REG)?\b", size_label)
     return m.group(1) if m else None
 
 
