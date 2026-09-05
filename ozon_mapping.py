@@ -37,6 +37,11 @@ TYPE_ID_TSHIRT = 93244           # "T-Shirt" — matches M&S "t-shirt"/"tişört
                                  # same RU size dictionary as existing clothing sizes -- added to
                                  # give category discovery more categories to fill daily quota
                                  # after every existing supported category was exhausted)
+TYPE_ID_TOP = 93236              # "Top" — matches M&S "üst"/"ust" (added 2026-09-05, second-largest
+                                 # untranslated cluster at 108 articles: a generic women's top/blouse
+                                 # item, distinct from t-shirt/tank-top. Same required attributes and
+                                 # standard clothing size dictionary as every other Clothing type here,
+                                 # no size-mapping complications.
 TYPE_ID_SOCKS = 93157            # "Socks" — matches M&S "çorap"/"corap" (added 2026-09-05: the
                                  # single largest untranslated cluster, 94 distinct articles, once
                                  # Ozon's quota jumped 250->2000. Same required-attribute set as
@@ -360,10 +365,29 @@ TANK_TOP_KEYWORDS = ("atlet",)
 PAJAMA_KEYWORDS = ("pijama", "pyjama")
 TSHIRT_KEYWORDS = ("t-shirt", "tshirt", "tişört", "tisort")
 SOCKS_KEYWORDS = ("çorap", "corap")  # added 2026-09-05 -- see TYPE_ID_SOCKS
+# "üst"/"ust" as a STANDALONE word only -- confirmed live, 2026-09-05, that
+# a plain substring check ("üst" in name) would also match inside "üstü"
+# (as in "Pijama Üstü"/pajama top), which must resolve to Pajama, not Top.
+# resolve_category_and_type() already checks PAJAMA_KEYWORDS first so this
+# never actually misfires there, but is_known_product_type() (used by
+# category_priority.py) checks "does ANY keyword match" without preserving
+# that order, so the substring bug would have made it treat pajama-top
+# category pages as "top" pages too. is_top_word() below does a real
+# word-boundary check instead of a plain substring test.
+TOP_KEYWORDS = ("üst", "ust")
 
 KNOWN_PRODUCT_TYPE_KEYWORDS = (
     UNDERWEAR_KEYWORDS + TANK_TOP_KEYWORDS + PAJAMA_KEYWORDS + TSHIRT_KEYWORDS + SOCKS_KEYWORDS
-)
+)  # TOP_KEYWORDS deliberately excluded -- see is_known_product_type()
+
+
+def is_top_word(name):
+    """True if `name` contains 'üst'/'ust' as a STANDALONE word (word
+    boundary on both sides) -- NOT as a substring, which would also match
+    inside 'üstü' ('Pijama Üstü' = pajama top, must resolve to Pajama, not
+    Top). Confirmed live, 2026-09-05: a naive `in` check matched both."""
+    lower = (name or "").lower()
+    return bool(re.search(r"(?<![a-zçğıöşü])(üst|ust)(?![a-zçğıöşü])", lower))
 
 
 def is_known_product_type(name):
@@ -373,7 +397,7 @@ def is_known_product_type(name):
     in sync by construction rather than by two lists someone has to
     remember to update together."""
     lower = (name or "").lower()
-    return any(kw in lower for kw in KNOWN_PRODUCT_TYPE_KEYWORDS)
+    return any(kw in lower for kw in KNOWN_PRODUCT_TYPE_KEYWORDS) or is_top_word(name)
 
 
 def resolve_category_and_type(name, is_set_hint):
@@ -390,7 +414,11 @@ def resolve_category_and_type(name, is_set_hint):
     'çorap'/'corap' = socks (added 2026-09-05, the single largest
     untranslated cluster at 94 articles -- see TYPE_ID_SOCKS and
     map_sock_size_to_ozon/map_sock_size_to_offer_id_token for the
-    shoe-size-range handling this type needs that no other type does).
+    shoe-size-range handling this type needs that no other type does),
+    'üst'/'ust' AS A STANDALONE WORD = generic top (added 2026-09-05,
+    second-largest cluster at 108 articles -- checked AFTER pajama, so
+    "Pijama Üstü" still correctly resolves to Pajama, not Top; see
+    is_top_word() for why this can't be a plain substring check).
     Returns (None, None) if the product doesn't match a known category --
     caller should skip rather than guess, since an unmapped category means
     unknown required fields."""
@@ -405,6 +433,8 @@ def resolve_category_and_type(name, is_set_hint):
         return CATEGORY_ID_CLOTHING, TYPE_ID_TSHIRT
     if any(kw in lower for kw in SOCKS_KEYWORDS):
         return CATEGORY_ID, TYPE_ID_SOCKS
+    if is_top_word(name):
+        return CATEGORY_ID_CLOTHING, TYPE_ID_TOP
     return None, None
 
 
