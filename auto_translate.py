@@ -26,15 +26,33 @@ from ozon_mapping import resolve_category_and_type
 
 MODEL = "claude-opus-5"
 
-# Material dictionary IDs already verified against Ozon's live attribute dictionary
-# (see ozon_translations.py's existing entries) — reused rather than re-queried per
-# product, since the same three materials cover every product so far. If the source
-# material text doesn't clearly match one of these, material_id is left null rather
-# than guessed, same as the "Synthetic" case in the T81006849L entry.
+# Material dictionary IDs verified against Ozon's live attribute dictionary (attribute
+# 4496 "Material", CATEGORY_ID_CLOTHING/TYPE_ID_SWEATER — confirmed live, 2026-09-07:
+# queried /v1/description-category/attribute/values directly rather than trusting the
+# model to know real dictionary ids). If the source material text doesn't clearly
+# match one of these, material_id is left null rather than guessed, same as the
+# "Synthetic" case in the T81006849L entry.
+#
+# The wool/acrylic/cashmere/mohair/knitwear entries were added after Kazak (sweater)
+# support surfaced a real bug: the model was inventing plausible-looking numeric ids
+# for materials with no whitelist entry (wool-family fabrics) instead of returning
+# null as instructed -- 20 products failed validation in the first Kazak translate
+# run, several with ids that don't exist in Ozon's dictionary at all (confirmed via
+# the same live query). The fix is a real dictionary lookup, not a wider net for the
+# model to guess into -- see SYSTEM_PROMPT's material_id rule, which lists these by
+# name so the model matches against real options instead of inventing one.
 KNOWN_MATERIAL_IDS = {
     "модал": 61952,
     "хлопок": 62174,
     "вискоза": 61786,
+    "шерсть": 62196,          # Wool
+    "акрил": 61748,           # Acrylic
+    "кашемир": 61869,         # Cashmere
+    "мохер": 61954,           # Mohair
+    "мериносовая шерсть": 61935,  # Merino wool
+    "трикотаж": 62135,        # Knitwear
+    "полиамид": 62024,        # Polyamide
+    "полиэстер": 62044,       # Polyester
 }
 
 # planting_type_id values already verified against Ozon's live dictionary, reused from
@@ -61,10 +79,13 @@ no invented warranty terms. If you don't know the exact composition, state only 
 infer from the source text (e.g. "Состав: хлопок, эластан") without percentages — elastane/spandex trim is a \
 safe inference for stretch underwear/loungewear if the source implies stretch, but do not invent it if nothing \
 suggests it.
-- "material_id" must be null unless the material clearly matches one of these known dictionary entries by name: \
-модал (Modal), хлопок (Cotton), вискоза (Viscose). If the source material is something else entirely (e.g. \
-synthetic/polyester with no clean match), set material_id to null and still describe it honestly in \
-material_text/material_composition.
+- "material_id" must be null unless the material clearly matches ONE of these known dictionary entries by name — \
+модал (Modal), хлопок (Cotton), вискоза (Viscose), шерсть (Wool), акрил (Acrylic), кашемир (Cashmere), \
+мохер (Mohair), мериносовая шерсть (Merino wool), трикотаж (Knitwear/generic knit), полиамид (Polyamide), \
+полиэстер (Polyester) — do NOT invent a numeric id for any other material, even one that sounds plausible: only \
+use an id from this exact list, by matching the material NAME, never guess or recall an id from memory. If the \
+source material is something else entirely, or a blend with no single clean match, set material_id to null and \
+still describe it honestly in material_text/material_composition.
 - "planting_type_id" must be null for anything that is not underwear (tank tops, tops, etc. never get this \
 field). For underwear, use 45007 (high leg/waist), 45009 (medium/shorts/Brazilian), or 45008 (low/thong) based \
 on the cut described in the source name, or null if the cut isn't specified.
@@ -118,6 +139,17 @@ Example 3 (tank top, modal — no planting_type_id, not underwear):
   "material_composition": "Состав: модал, эластан",
   "care_text": "Машинная стирка при 30°C. Не отбеливать. Сушить при низкой температуре.",
   "hashtags": "#майка #женскоебелье #модал #безрукавов #домашняяодежда"
+}
+
+Example 4 (sweater, wool blend — no planting_type_id, not underwear):
+{
+  "name": "Пуловер с круглым вырезом из шерсти",
+  "description": "Женский пуловер с круглым вырезом из мягкой шерстяной пряжи. Классический крой, эластичная резинка на манжетах и подоле.",
+  "material_id": 62196,
+  "material_text": "Шерсть",
+  "material_composition": "Состав: шерсть, полиамид",
+  "care_text": "Ручная стирка при низкой температуре. Не отбеливать. Сушить в разложенном виде.",
+  "hashtags": "#пуловер #женскийсвитер #шерсть #круглыйвырез #трикотаж"
 }"""
 
 OUTPUT_SCHEMA = {

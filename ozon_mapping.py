@@ -52,6 +52,24 @@ TYPE_ID_SOCKS = 93157            # "Socks" — matches M&S "çorap"/"corap" (add
                                  # picking an arbitrary single number from the range. Plain letter
                                  # labels (S/M/L/XL, also seen on real sock listings) still use the
                                  # existing LETTER_TO_RU_SIZE chart, unaffected.
+TYPE_ID_SWEATER = 93214          # "Sweater" — matches M&S "kazak" (added 2026-09-07, business
+                                 # instruction to continue adding categories, starting with
+                                 # kadin-kazaklar/women's sweaters. Confirmed live: same required-
+                                 # attribute set as every other type here (9163/10096/31/4295/8292/
+                                 # 8229) and standard letter/UK clothing sizes, no mapping
+                                 # complications. Ozon also has a distinct "Jumper" type (93079)
+                                 # with the identical attribute set -- Sweater was chosen as the
+                                 # more literal/unambiguous match for "Kazak".
+TYPE_ID_DRESS = 93182            # "Dress" — matches M&S "elbise" (added 2026-09-07, business
+                                 # instruction to continue with kadin-elbiseler/women's dresses.
+                                 # Same required-attribute set as every other type here. Ozon also
+                                 # has "Sundress" (93211, identical attributes) and "Go-Go Dress"
+                                 # (93183, not valid for this description_category_id at all) --
+                                 # Dress was chosen as the general-purpose match; M&S's own
+                                 # sub-category naming (Midi/Desenli/Gömlek/Mini Elbiseler) doesn't
+                                 # cleanly separate "sundress" from ordinary dress, so no attempt is
+                                 # made to route "Plaj Elbiseleri" (beach dresses) to Sundress
+                                 # separately -- can revisit if that distinction turns out to matter.
 
 ATTR_SIZE = 4295
 ATTR_GENDER = 9163
@@ -372,6 +390,11 @@ TANK_TOP_KEYWORDS = ("atlet",)
 PAJAMA_KEYWORDS = ("pijama", "pyjama")
 TSHIRT_KEYWORDS = ("t-shirt", "tshirt", "tişört", "tisort")
 SOCKS_KEYWORDS = ("çorap", "corap")  # added 2026-09-05 -- see TYPE_ID_SOCKS
+SWEATER_KEYWORDS = ("kazak",)  # added 2026-09-07 -- see TYPE_ID_SWEATER
+DRESS_KEYWORDS = ("elbise",)  # added 2026-09-07 -- see TYPE_ID_DRESS. NOTE: "elbise" alone is
+# ambiguous with "takım elbise" (men's suit, a completely different garment, e.g. M&S category
+# "Takım Elbiseler"/https://www.marksandspencer.com.tr/takim-elbiseler/) -- is_dress_word() below
+# excludes that compound explicitly rather than doing a plain substring check.
 # "üst"/"ust" as a STANDALONE word only -- confirmed live, 2026-09-05, that
 # a plain substring check ("üst" in name) would also match inside "üstü"
 # (as in "Pijama Üstü"/pajama top), which must resolve to Pajama, not Top.
@@ -383,9 +406,10 @@ SOCKS_KEYWORDS = ("çorap", "corap")  # added 2026-09-05 -- see TYPE_ID_SOCKS
 # word-boundary check instead of a plain substring test.
 TOP_KEYWORDS = ("üst", "ust")
 
-KNOWN_PRODUCT_TYPE_KEYWORDS = (
+KNOWN_PRODUCT_TYPE_KEYWORDS_NO_DRESS = (
     UNDERWEAR_KEYWORDS + TANK_TOP_KEYWORDS + PAJAMA_KEYWORDS + TSHIRT_KEYWORDS + SOCKS_KEYWORDS
-)  # TOP_KEYWORDS deliberately excluded -- see is_known_product_type()
+    + SWEATER_KEYWORDS
+)  # TOP_KEYWORDS and DRESS_KEYWORDS deliberately excluded -- see is_known_product_type()
 
 
 def is_top_word(name):
@@ -408,6 +432,20 @@ def is_top_word(name):
     return bool(re.search(r"(?<![a-zçğıöşü])(üst|ust)(ü|u)?(?![a-zçğıöşü])", lower))
 
 
+def is_dress_word(name):
+    """True if `name` contains 'elbise' as a dress reference, EXCLUDING the
+    compound 'takım elbise' (men's suit -- a completely different garment,
+    M&S category "Takım Elbiseler"). Confirmed live, 2026-09-07: a plain
+    substring check on DRESS_KEYWORDS would have made is_known_product_type()
+    mark the men's suit category as a supported dress category, and
+    resolve_category_and_type() would map real suit jackets/trousers to
+    Dress -- caught before either ever ran against real suit product names."""
+    lower = (name or "").lower()
+    if "elbise" not in lower:
+        return False
+    return not re.search(r"tak[iı]m\s+elbise", lower)
+
+
 def is_known_product_type(name):
     """True if `name` contains a keyword resolve_category_and_type() can
     actually map to a category/type -- used by category_priority.py to
@@ -415,7 +453,8 @@ def is_known_product_type(name):
     in sync by construction rather than by two lists someone has to
     remember to update together."""
     lower = (name or "").lower()
-    return any(kw in lower for kw in KNOWN_PRODUCT_TYPE_KEYWORDS) or is_top_word(name)
+    return (any(kw in lower for kw in KNOWN_PRODUCT_TYPE_KEYWORDS_NO_DRESS) or is_top_word(name)
+            or is_dress_word(name))
 
 
 def resolve_category_and_type(name, is_set_hint):
@@ -436,7 +475,12 @@ def resolve_category_and_type(name, is_set_hint):
     'üst'/'ust' AS A STANDALONE WORD = generic top (added 2026-09-05,
     second-largest cluster at 108 articles -- checked AFTER pajama, so
     "Pijama Üstü" still correctly resolves to Pajama, not Top; see
-    is_top_word() for why this can't be a plain substring check).
+    is_top_word() for why this can't be a plain substring check),
+    'kazak' = sweater (added 2026-09-07, business instruction to continue
+    adding categories -- see TYPE_ID_SWEATER),
+    'elbise' EXCLUDING 'takım elbise' = dress (added 2026-09-07, business
+    instruction to continue with kadin-elbiseler/women's dresses; see
+    is_dress_word() for why 'takım elbise'/men's-suit must be excluded).
     Returns (None, None) if the product doesn't match a known category --
     caller should skip rather than guess, since an unmapped category means
     unknown required fields."""
@@ -451,6 +495,10 @@ def resolve_category_and_type(name, is_set_hint):
         return CATEGORY_ID_CLOTHING, TYPE_ID_TSHIRT
     if any(kw in lower for kw in SOCKS_KEYWORDS):
         return CATEGORY_ID, TYPE_ID_SOCKS
+    if any(kw in lower for kw in SWEATER_KEYWORDS):
+        return CATEGORY_ID_CLOTHING, TYPE_ID_SWEATER
+    if is_dress_word(name):
+        return CATEGORY_ID_CLOTHING, TYPE_ID_DRESS
     if is_top_word(name):
         return CATEGORY_ID_CLOTHING, TYPE_ID_TOP
     return None, None
