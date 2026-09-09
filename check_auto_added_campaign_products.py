@@ -68,8 +68,12 @@ def main():
         if non_manual:
             product_ids = [p["id"] for p in non_manual]
             info = call("/v3/product/info/list", {"product_id": product_ids[:1000]})
+            # NOTE: /v3/product/info/list's response is flat ("items" at the top level, not
+            # nested under "result") -- confirmed live, 2026-09-08, same pre-existing bug
+            # pattern already found and fixed in enroll_campaigns.py. Was silently causing
+            # every logged entry here to have offer_id/name = null.
             names_by_id = {item["id"]: (item.get("offer_id"), item.get("name"))
-                           for item in info.get("result", {}).get("items", [])}
+                           for item in info.get("items", [])}
 
             with open(ALERT_LOG, "a", encoding="utf-8") as f:
                 for p in non_manual:
