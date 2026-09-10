@@ -70,6 +70,23 @@ TYPE_ID_DRESS = 93182            # "Dress" — matches M&S "elbise" (added 2026-
                                  # cleanly separate "sundress" from ordinary dress, so no attempt is
                                  # made to route "Plaj Elbiseleri" (beach dresses) to Sundress
                                  # separately -- can revisit if that distinction turns out to matter.
+TYPE_ID_TROUSERS = 93055         # "Trousers" — matches M&S "pantolon" (added 2026-09-10, business
+                                 # instruction to add 2000 products from kadin-giyim/all women's
+                                 # clothing; the single largest unsupported cluster there, 49 of 280
+                                 # sampled articles). Same required-attribute set as every other
+                                 # type here. Must be checked AFTER SOCKS_KEYWORDS -- "Pantolon
+                                 # Çorabı" (tights/pantyhose 3-packs) contains "pantolon" as a
+                                 # substring but is a real sock-family product, not trousers.
+TYPE_ID_BLOUSE = 93048           # "Blouse" — matches M&S "bluz" (added 2026-09-10, second-largest
+                                 # unsupported cluster in kadin-giyim, 42 of 280 sampled articles).
+                                 # Same required-attribute set as every other type here.
+TYPE_ID_SKIRT = 93283            # "Skirt" — matches M&S "etek" (added 2026-09-10). Same required-
+                                 # attribute set as every other type here.
+TYPE_ID_JACKET = 93137           # "Jacket" — matches M&S "ceket" (added 2026-09-10). Same
+                                 # required-attribute set as every other type here. Ozon also has
+                                 # "Suit Jacket" (93175) and "Down Jacket" (93205) for more specific
+                                 # cases -- plain Jacket chosen as the general-purpose match, same
+                                 # reasoning as Dress vs Sundress.
 
 ATTR_SIZE = 4295
 ATTR_GENDER = 9163
@@ -389,12 +406,24 @@ UNDERWEAR_KEYWORDS = ("kulot", "külot", "tanga", "boxer", "trunk", "brief", "sl
 TANK_TOP_KEYWORDS = ("atlet",)
 PAJAMA_KEYWORDS = ("pijama", "pyjama")
 TSHIRT_KEYWORDS = ("t-shirt", "tshirt", "tişört", "tisort")
-SOCKS_KEYWORDS = ("çorap", "corap")  # added 2026-09-05 -- see TYPE_ID_SOCKS
+SOCKS_KEYWORDS = ("çorap", "corap", "çorab", "corab")  # added 2026-09-05 -- see TYPE_ID_SOCKS.
+# "çorab"/"corab" added 2026-09-10: Turkish possessive suffixing softens the final
+# consonant (çorap -> çorabı, "Pantolon Çorabı" = tights/pantyhose 3-pack), so the bare
+# nominative stem alone missed 16 real, already-crawled products (confirmed live via
+# products.csv) -- silently skipped as "unknown category" rather than resolving to
+# Socks. Caught while adding Trousers support: "pantolon" alone would otherwise have
+# misrouted these same 16 products to Trousers instead of leaving them correctly
+# unmapped/skipped -- socks must be checked (and matched) before that ever applies.
 SWEATER_KEYWORDS = ("kazak",)  # added 2026-09-07 -- see TYPE_ID_SWEATER
 DRESS_KEYWORDS = ("elbise",)  # added 2026-09-07 -- see TYPE_ID_DRESS. NOTE: "elbise" alone is
 # ambiguous with "takım elbise" (men's suit, a completely different garment, e.g. M&S category
 # "Takım Elbiseler"/https://www.marksandspencer.com.tr/takim-elbiseler/) -- is_dress_word() below
 # excludes that compound explicitly rather than doing a plain substring check.
+TROUSERS_KEYWORDS = ("pantolon",)  # added 2026-09-10 -- see TYPE_ID_TROUSERS. Checked AFTER
+# SOCKS_KEYWORDS in resolve_category_and_type() -- "Pantolon Çorabı" must resolve to Socks.
+BLOUSE_KEYWORDS = ("bluz",)  # added 2026-09-10 -- see TYPE_ID_BLOUSE
+SKIRT_KEYWORDS = ("etek",)  # added 2026-09-10 -- see TYPE_ID_SKIRT
+JACKET_KEYWORDS = ("ceket",)  # added 2026-09-10 -- see TYPE_ID_JACKET
 # "üst"/"ust" as a STANDALONE word only -- confirmed live, 2026-09-05, that
 # a plain substring check ("üst" in name) would also match inside "üstü"
 # (as in "Pijama Üstü"/pajama top), which must resolve to Pajama, not Top.
@@ -408,7 +437,7 @@ TOP_KEYWORDS = ("üst", "ust")
 
 KNOWN_PRODUCT_TYPE_KEYWORDS_NO_DRESS = (
     UNDERWEAR_KEYWORDS + TANK_TOP_KEYWORDS + PAJAMA_KEYWORDS + TSHIRT_KEYWORDS + SOCKS_KEYWORDS
-    + SWEATER_KEYWORDS
+    + SWEATER_KEYWORDS + TROUSERS_KEYWORDS + BLOUSE_KEYWORDS + SKIRT_KEYWORDS + JACKET_KEYWORDS
 )  # TOP_KEYWORDS and DRESS_KEYWORDS deliberately excluded -- see is_known_product_type()
 
 
@@ -480,7 +509,11 @@ def resolve_category_and_type(name, is_set_hint):
     adding categories -- see TYPE_ID_SWEATER),
     'elbise' EXCLUDING 'takım elbise' = dress (added 2026-09-07, business
     instruction to continue with kadin-elbiseler/women's dresses; see
-    is_dress_word() for why 'takım elbise'/men's-suit must be excluded).
+    is_dress_word() for why 'takım elbise'/men's-suit must be excluded),
+    'pantolon' = trousers (added 2026-09-10, checked AFTER socks -- see
+    TROUSERS_KEYWORDS), 'bluz' = blouse, 'etek' = skirt, 'ceket' = jacket
+    (all added 2026-09-10, business instruction to add products from
+    kadin-giyim/all women's clothing).
     Returns (None, None) if the product doesn't match a known category --
     caller should skip rather than guess, since an unmapped category means
     unknown required fields."""
@@ -497,6 +530,14 @@ def resolve_category_and_type(name, is_set_hint):
         return CATEGORY_ID, TYPE_ID_SOCKS
     if any(kw in lower for kw in SWEATER_KEYWORDS):
         return CATEGORY_ID_CLOTHING, TYPE_ID_SWEATER
+    if any(kw in lower for kw in TROUSERS_KEYWORDS):
+        return CATEGORY_ID_CLOTHING, TYPE_ID_TROUSERS
+    if any(kw in lower for kw in BLOUSE_KEYWORDS):
+        return CATEGORY_ID_CLOTHING, TYPE_ID_BLOUSE
+    if any(kw in lower for kw in SKIRT_KEYWORDS):
+        return CATEGORY_ID_CLOTHING, TYPE_ID_SKIRT
+    if any(kw in lower for kw in JACKET_KEYWORDS):
+        return CATEGORY_ID_CLOTHING, TYPE_ID_JACKET
     if is_dress_word(name):
         return CATEGORY_ID_CLOTHING, TYPE_ID_DRESS
     if is_top_word(name):

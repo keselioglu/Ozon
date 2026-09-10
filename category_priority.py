@@ -38,14 +38,39 @@ PRIORITY_FILE = "category_priority.csv"
 URLS_FILE = "product_urls.txt"
 
 
-def is_supported_category(name):
+# "Umbrella" category pages whose own CATEGORY NAME is too generic to match
+# any type keyword (e.g. "Giyim (Tümü)" = "Clothing (All)"), but whose
+# CONTENTS are a mix of many product types, several of which the pipeline
+# does support. is_supported_category() checks the name only (a deliberate
+# design choice -- see its own docstring -- to avoid spending crawl requests
+# on categories with nothing minable), which silently excluded these pages
+# entirely: confirmed live, 2026-09-10, business instruction "add 2000 new
+# products from kadin-giyim" found kadin-giyim never actually crawled because
+# its name never matched a keyword, even though most of its individual
+# products do. Listed explicitly by URL (not name) since the name itself
+# isn't a reliable signal here by construction -- unresolvable products
+# inside these pages are still correctly skipped downstream, per-product, by
+# resolve_category_and_type() returning (None, None), so crawling them is
+# safe, just was never being attempted.
+UMBRELLA_CATEGORY_URLS = {
+    "https://www.marksandspencer.com.tr/kadin-giyim/",
+}
+
+
+def is_supported_category(name, url=None):
     """Delegates to ozon_mapping.is_known_product_type() -- MUST stay a
     single source of truth with resolve_category_and_type()'s own keyword
     groups. Confirmed live, 2026-09-04: this function used to hardcode its
     own, much shorter keyword list that silently drifted out of sync with
     resolve_category_and_type() every time a new product type was added
     there (boxer/trunk/brief/slip/hipster/pijama/t-shirt), so discovery
-    kept skipping categories this pipeline could actually handle."""
+    kept skipping categories this pipeline could actually handle.
+
+    `url` is optional (defaults to name-only checking) so existing callers
+    don't break, but should be passed wherever available -- see
+    UMBRELLA_CATEGORY_URLS above for why."""
+    if url in UMBRELLA_CATEGORY_URLS:
+        return True
     return is_known_product_type(name)
 
 
@@ -162,7 +187,7 @@ def run_priority_cycle(target_new_products=None):
         url = row.get("Full URL")
         priority = row.get("Proprity")
 
-        if not is_supported_category(name):
+        if not is_supported_category(name, url):
             skipped_unsupported += 1
             continue
 
