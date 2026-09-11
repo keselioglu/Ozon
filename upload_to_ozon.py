@@ -7,6 +7,7 @@ even though this runs fully automatically without pausing for confirmation.
 """
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -154,7 +155,25 @@ def build_ozon_item(row, offer_id_suffix=""):
 
     dims = package_dimensions(row.get("name"))
 
-    images = [u.strip() for u in str(row.get("image_urls") or "").split("|") if u.strip()]
+    raw_image_urls = row.get("image_urls")
+    # pd.isna(), not `or ""` -- a missing image_urls cell round-trips through pandas as
+    # float('nan'), and `nan or ""` evaluates to nan (NaN is truthy in Python), which
+    # str()'d into the literal text "nan" and got treated as a real (invalid) image URL.
+    # Confirmed live, 2026-09-10: this crashed a whole upload batch with a hard 400 on
+    # /v3/product/import ("PrimaryImage: invalid URL") rather than skipping just the one
+    # product with no crawled photos.
+    images = [] if pd.isna(raw_image_urls) else [u.strip() for u in str(raw_image_urls).split("|") if u.strip()]
+    images = [u for u in images if re.match(r"^https?://", u)]
+    if not images:
+        # An empty images list makes primary_image None, which Ozon's /v3/product/import
+        # rejects with "invalid URL" -- but as a hard 400 on the WHOLE BATCH, not a
+        # per-item skip, so one bad product was crashing the entire upload run partway
+        # through (batch 19 of a 1900-item run, silently losing every later batch that
+        # would have followed). Every other missing-required-field case in this function
+        # already returns
+        # None/skip instead of building a broken item -- this one just didn't have
+        # the check.
+        return None, warnings + ["No image URLs found for this product — not pushed to Ozon."]
 
     attributes = [
         {"id": ATTR_SIZE, "values": [{"dictionary_value_id": size_id}]},
