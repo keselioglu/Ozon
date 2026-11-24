@@ -22,6 +22,7 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+from content_media import fetch_attributes, fetch_prices
 from ozon_client import call
 from ozon_mapping import extract_article_code_from_offer_id
 from ozon_translations import PRODUCT_TRANSLATIONS
@@ -59,49 +60,6 @@ def find_live_offer_ids_for_articles(article_codes):
         if not cursor or not items:
             break
     return matches
-
-
-def fetch_attributes(offer_ids):
-    offer_ids = list(offer_ids)
-    records = {}
-    for i in range(0, len(offer_ids), 1000):
-        batch = offer_ids[i:i + 1000]
-        cursor = ""
-        while True:
-            params = {"filter": {"offer_id": batch}, "limit": 1000}
-            if cursor:
-                params["last_id"] = cursor
-            result = call("/v4/product/info/attributes", params)
-            for item in result.get("result", []):
-                records[item["offer_id"]] = item
-            cursor = result.get("last_id")
-            if not cursor or not result.get("result"):
-                break
-    return records
-
-
-def fetch_prices(offer_ids):
-    offer_ids = list(offer_ids)
-    prices = {}
-    for i in range(0, len(offer_ids), 1000):
-        batch = offer_ids[i:i + 1000]
-        cursor = ""
-        while True:
-            params = {"filter": {"offer_id": batch}, "limit": 1000}
-            if cursor:
-                params["cursor"] = cursor
-            result = call("/v5/product/info/prices", params)
-            for item in result.get("items", []):
-                price_info = item.get("price", {})
-                prices[item["offer_id"]] = {
-                    "price": str(price_info.get("price", "")),
-                    "currency_code": price_info.get("currency_code", "USD"),
-                    "vat": str(price_info.get("vat", "0")),
-                }
-            cursor = result.get("cursor")
-            if not cursor or not result.get("items"):
-                break
-    return prices
 
 
 def build_corrected_item(record, new_hashtags, new_description, price_info):

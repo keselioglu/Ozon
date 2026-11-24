@@ -65,7 +65,7 @@ def center_crop_zoom(img, ratio):
     return cropped.resize((w, h), Image.LANCZOS)
 
 
-def generate_extra_photos_for_product(folder_key, image_urls, output_dir):
+def generate_extra_photos_for_product(folder_key, image_urls, output_dir, target=TARGET_PHOTO_COUNT):
     """Downloads the product's real photos and generates ONE zoom crop per
     source photo (business instruction, 2026-08-27: "not the zoom of same
     photo use different photos to zoom" -- an earlier version cycled through
@@ -76,7 +76,7 @@ def generate_extra_photos_for_product(folder_key, image_urls, output_dir):
     cover the gap; that's a hard ceiling now, not something to paper over by
     reusing a photo at a different zoom depth."""
     real_count = len(image_urls)
-    needed = TARGET_PHOTO_COUNT - real_count
+    needed = target - real_count
     if needed <= 0 or not image_urls:
         return []
 
@@ -104,7 +104,7 @@ def generate_extra_photos_for_product(folder_key, image_urls, output_dir):
 
     if len(generated_paths) < needed:
         print(f"    ! only {len(generated_paths)}/{needed} crop(s) generated -- "
-              f"not enough distinct real photos ({real_count}) to reach {TARGET_PHOTO_COUNT} without reusing one.")
+              f"not enough distinct real photos ({real_count}) to reach {target} without reusing one.")
 
     return generated_paths
 

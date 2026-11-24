@@ -49,20 +49,19 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-import boto3
 import pandas as pd
 from dotenv import load_dotenv
 
+from content_media import (
+    ATTR_VIDEO_COVER, ATTR_VIDEO_LINK, ATTR_VIDEO_TITLE,
+    build_merged_import_item, delete_r2_objects, fetch_attributes, fetch_prices, find_live_ms_offer_ids,
+)
 from ozon_client import call
 from ozon_mapping import map_size_to_eu
-from r2_storage import R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME, upload_file
+from r2_storage import upload_file
 from upload_to_ozon import build_sku
 
 load_dotenv()
-
-ATTR_VIDEO_LINK = 21841
-ATTR_VIDEO_TITLE = 21837
-ATTR_VIDEO_COVER = 21845
 
 VIDEOS_DIR = "generated_videos"
 PRODUCTS_CSV = "products.csv"
@@ -70,111 +69,14 @@ PUSH_LOG = "video_push_log.jsonl"
 BATCH_SIZE = 100
 
 
-def find_live_ms_offer_ids():
-    """Every live (non-archived) MS-prefix offer_id -- the only prefix whose
-    offer_id can be reliably reconstructed from (article, color, eu_size)."""
-    matches = []
-    cursor = ""
-    while True:
-        params = {"filter": {}, "limit": 1000}
-        if cursor:
-            params["last_id"] = cursor
-        result = call("/v3/product/list", params)
-        page = result.get("result", {})
-        items = page.get("items", [])
-        for item in items:
-            oid = item.get("offer_id", "")
-            if not item.get("archived") and oid.startswith("MS-"):
-                matches.append(oid)
-        cursor = page.get("last_id")
-        if not cursor or not items:
-            break
-    return matches
-
-
-def fetch_attributes(offer_ids):
-    offer_ids = list(offer_ids)
-    records = {}
-    for i in range(0, len(offer_ids), 1000):
-        batch = offer_ids[i:i + 1000]
-        cursor = ""
-        while True:
-            params = {"filter": {"offer_id": batch}, "limit": 1000}
-            if cursor:
-                params["last_id"] = cursor
-            result = call("/v4/product/info/attributes", params)
-            for item in result.get("result", []):
-                records[item["offer_id"]] = item
-            cursor = result.get("last_id")
-            if not cursor or not result.get("result"):
-                break
-    return records
-
-
-def fetch_prices(offer_ids):
-    offer_ids = list(offer_ids)
-    prices = {}
-    for i in range(0, len(offer_ids), 1000):
-        batch = offer_ids[i:i + 1000]
-        cursor = ""
-        while True:
-            params = {"filter": {"offer_id": batch}, "limit": 1000}
-            if cursor:
-                params["cursor"] = cursor
-            result = call("/v5/product/info/prices", params)
-            for item in result.get("items", []):
-                price_info = item.get("price", {})
-                prices[item["offer_id"]] = {
-                    "price": str(price_info.get("price", "")),
-                    "currency_code": price_info.get("currency_code", "USD"),
-                    "vat": str(price_info.get("vat", "0")),
-                }
-            cursor = result.get("cursor")
-            if not cursor or not result.get("items"):
-                break
-    return prices
-
-
 def build_video_item(record, video_url, price_info):
-    # 21845 (video cover) deliberately omitted -- see module docstring.
-    attributes = [a for a in record["attributes"] if a["id"] not in
-                  (ATTR_VIDEO_LINK, ATTR_VIDEO_TITLE, ATTR_VIDEO_COVER)]
-    attributes.append({"id": ATTR_VIDEO_LINK, "values": [{"value": video_url}]})
-    attributes.append({"id": ATTR_VIDEO_TITLE, "values": [{"value": record["name"]}]})
-
-    return {
-        "offer_id": record["offer_id"],
-        "name": record["name"],
-        "description_category_id": record["description_category_id"],
-        "type_id": record["type_id"],
-        "attributes": attributes,
-        "price": price_info["price"],
-        "currency_code": price_info["currency_code"],
-        "vat": price_info["vat"],
-        "images": record.get("images", []),
-        "primary_image": record.get("primary_image"),
-        "weight": record.get("weight"),
-        "weight_unit": record.get("weight_unit"),
-        "depth": record.get("depth"),
-        "width": record.get("width"),
-        "height": record.get("height"),
-        "dimension_unit": record.get("dimension_unit"),
-    }
-
-
-def delete_r2_objects(keys):
-    client = boto3.client(
-        "s3",
-        endpoint_url=f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com",
-        aws_access_key_id=R2_ACCESS_KEY_ID,
-        aws_secret_access_key=R2_SECRET_ACCESS_KEY,
-        region_name="auto",
-    )
-    for key in keys:
-        try:
-            client.delete_object(Bucket=R2_BUCKET_NAME, Key=key)
-        except Exception as e:
-            print(f"    ! could not delete R2 object {key}: {e}")
+    """Live record with only the video link/title set. 21845 (video cover)
+    is deliberately removed -- see module docstring."""
+    return build_merged_import_item(record, price_info, attr_overrides={
+        ATTR_VIDEO_LINK: video_url,
+        ATTR_VIDEO_TITLE: record["name"],
+        ATTR_VIDEO_COVER: None,
+    })
 
 
 def delete_local_video_dir(folder_key):
