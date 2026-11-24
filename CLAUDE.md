@@ -72,7 +72,14 @@ never in a database.
 14. **Auto-added campaign check** (`check_auto_added_campaign_products.py`) —
     detects (log-only) any campaign product Ozon added itself
     (`add_mode != "MANUAL"`) rather than through step 9. See note below.
-15. Log to `TASKS.md`, commit & push, post summary to GitHub issue #13.
+15. **Account snapshot** (`account_snapshot.py`, 600s timeout) — read-only,
+    offline: rebuilds `account_snapshot.json` (Ozon Sales Overview data) from
+    `catalog_status.json` / `catalog_live_offer_ids.json` /
+    `warehouse_assignments.json`. Warning-only: a failure/timeout is an
+    attention entry, never a failed run (and a warning on the Daily tasks
+    tab). Only as fresh as `catalog_status.json`, which daily_run doesn't
+    refresh.
+16. Log to `TASKS.md`, commit & push, post summary to GitHub issue #13.
 
 Other scheduled tasks (Windows Task Scheduler): `MandsOzonQuotaTopup` (5am),
 `MandsOzonTodaysStockCheck` (6am, runs `check_todays_stock.py` — a narrower,

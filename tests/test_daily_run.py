@@ -1,4 +1,5 @@
 import time
+import pytest
 
 import daily_run
 
@@ -178,3 +179,75 @@ def test_status_write_failure_never_raises(monkeypatch, tmp_path):
     monkeypatch.setattr(daily_run, "STATUS_FILE", tmp_path / "missing_dir" / "s.json")
     daily_run.write_run_status("running")
     assert any("could not write" in m for m in logged)
+
+
+# --- account snapshot step (task #67) ---
+
+def test_account_snapshot_step_in_list(monkeypatch):
+    calls, summaries, _, _ = _patch_run(monkeypatch, failing=())
+    daily_run.main()
+    scripts = [c[1][0] for c in calls]
+    assert "account_snapshot.py" in scripts
+    i_snap = scripts.index("account_snapshot.py")
+    assert calls[i_snap][2] == 600
+    for earlier in ("refresh_live_stock.py", "update_stocks.py",
+                    "check_auto_added_campaign_products.py"):
+        assert scripts.index(earlier) < i_snap
+    assert len(summaries) == 1
+
+
+def test_account_snapshot_failure_does_not_fail_run(monkeypatch, tmp_path):
+    status_file = tmp_path / "daily_run_status.json"
+    monkeypatch.setattr(daily_run, "STATUS_FILE", status_file)
+    _, summaries, reports, commits = _patch_run(monkeypatch, failing=("account_snapshot.py",))
+    daily_run.main()
+    assert len(summaries) == 1
+    assert "FAILED" not in summaries[0]
+    assert f"Daily run log: {daily_run.TODAY}" in commits
+    assert len(reports) == 1
+    assert "Account snapshot step failed" in reports[0]
+    st = _read_status(status_file)
+    assert st["state"] == "completed"
+    assert any("Account snapshot step failed" in a for a in st["attention"])
+
+
+def _patch_subprocess_run(monkeypatch, tmp_path, snapshot_outcome):
+    summaries, reports, commits = [], [], []
+    status_file = tmp_path / "daily_run_status.json"
+    monkeypatch.setattr(daily_run, "LOG_FILE", tmp_path / "run.log")
+    monkeypatch.setattr(daily_run, "STATUS_FILE", status_file)
+    monkeypatch.setattr(daily_run, "STEP_RESULTS", [])
+    monkeypatch.setattr(daily_run, "check_for_file_locks", lambda: [])
+    monkeypatch.setattr(daily_run, "log", lambda msg: None)
+    monkeypatch.setattr(daily_run, "update_tasks_md", lambda s: summaries.append(s))
+    monkeypatch.setattr(daily_run, "git_commit_and_push", lambda m: commits.append(m) or True)
+    monkeypatch.setattr(daily_run, "post_github_report", lambda body: reports.append(body))
+    monkeypatch.setattr(daily_run, "plan_progress_line", lambda: "plan 0/500 created")
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+
+    def fake_run(cmd, **kw):
+        if "account_snapshot.py" in cmd:
+            if snapshot_outcome == "timeout":
+                raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+            return subprocess.CompletedProcess(cmd, 1, stdout="boom", stderr="")
+        if "check_upload_status.py" in cmd:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="Totals: 1 succeeded/moderating, 0 failed, 0 pending.", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="Done. ok.", stderr="")
+
+    monkeypatch.setattr(daily_run.subprocess, "run", fake_run)
+    return status_file, summaries, reports, commits
+
+
+@pytest.mark.parametrize("outcome,expected", [("timeout", "timeout"), ("rc1", "failed")])
+def test_account_snapshot_timeout_or_error_still_completes(monkeypatch, tmp_path, outcome, expected):
+    status_file, summaries, reports, commits = _patch_subprocess_run(monkeypatch, tmp_path, outcome)
+    daily_run.main()
+    snap = [s for s in daily_run.STEP_RESULTS if s["script"] == "account_snapshot.py"]
+    assert len(snap) == 1 and snap[0]["status"] == expected
+    assert len(summaries) == 1 and "FAILED" not in summaries[0]
+    assert f"Daily run log: {daily_run.TODAY}" in commits
+    assert len(reports) == 1 and "Account snapshot step failed" in reports[0]
+    st = _read_status(status_file)
+    assert st["state"] == "completed"
+    assert any(s["script"] == "account_snapshot.py" and s["status"] == expected for s in st["steps"])

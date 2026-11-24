@@ -13,7 +13,8 @@ Tabs, in order:
     daily_run_status.json isn't today's, and collect errors. Data comes from
     task_status.collect_status() on a worker thread; Refresh (the only
     button) or the 60s auto-refresh, never two collects at once. A
-    recheck_stockouts timeout is shown as a warning, not a failure.
+    recheck_stockouts timeout, and an account_snapshot failure or timeout
+    (warning-only step), are shown as warnings, not failures.
   * Prioritization (opens first) -- the daily planner: splits the day's
     new-offer plan (daily_plan.json) by brand x category, with the numbers
     to decide on.
@@ -467,6 +468,7 @@ CODE_RUNNING, CODE_DISABLED, CODE_NEVER_RUN = 0x41301, 0x41302, 0x41303
 RUNNING_WORDS = ("running", "çalışıyor")
 DISABLED_WORDS = ("disabled", "devre dışı", "devre dişi")
 NORMAL_TIMEOUT_STEPS = ("recheck_stockouts",)  # CLAUDE.md: under-provisioned, normal
+WARNING_ONLY_STEPS = ("account_snapshot",)  # daily_run: never fails the run
 DASH = "—"
 
 
@@ -592,13 +594,23 @@ def _step_is_normal_timeout(step):
     return any(k in text for k in NORMAL_TIMEOUT_STEPS)
 
 
+def _step_is_warning_only(step):
+    text = _fold(step.get("script")) + " " + _fold(step.get("name"))
+    return any(k in text for k in WARNING_ONLY_STEPS)
+
+
 def step_level(step):
-    """daily_run step record -> STATUS key. Only the recheck_stockouts timeout is a warning."""
+    """daily_run step record -> STATUS key. A recheck_stockouts timeout, and any
+    failure or timeout of a warning-only step (account_snapshot), is a warning."""
     try:
         step = _as_dict(step)
         status = _fold(step.get("status"))
         if status == "ok":
             return "good"
+        if _step_is_warning_only(step) and (
+                status in ("timeout", "timed out", "failed") or step.get("ok") is False
+                or any(w in status for w in ("fail", "error", "crash"))):
+            return "warning"
         if status in ("timeout", "timed out"):
             return "warning" if _step_is_normal_timeout(step) else "critical"
         if (status == "failed" or step.get("ok") is False

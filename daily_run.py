@@ -34,6 +34,9 @@ Scheduler once a day. Runs, in order:
      per offer_id, capped by a share of the daily_update quota.
   7c. Detect (log-only for now) any campaign product Ozon added
      automatically rather than through 7b (check_auto_added_campaign_products.py).
+  7d. Account snapshot (account_snapshot.py) -- read-only, offline rebuild of
+     account_snapshot.json (the Ozon Sales Overview data) from local state
+     files. Warning-only: a failure or timeout never fails the run.
   8. Log to TASKS.md, commit & push.
   9. Post the run summary as a comment on GitHub issue #13 (business
      instruction, 2026-09-02: "i just need reminders and daily reports to my
@@ -516,6 +519,15 @@ def main():
     # Today's created-offer totals so far (local only, non-fatal).
     run_step("Created history (category_inventory.py --record-history)",
              ["category_inventory.py", "--record-history"], timeout=300)
+
+    # 7d. Account snapshot -- read-only and offline (no Ozon calls): reads
+    # catalog_status.json / catalog_live_offer_ids.json /
+    # warehouse_assignments.json and writes account_snapshot.json for the
+    # Ozon Sales Overview. Warning-only: never fails the run.
+    ok, _ = run_step("Account snapshot (account_snapshot.py)", ["account_snapshot.py"], timeout=600)
+    if not ok:
+        attention.append("Account snapshot step failed — see log for details "
+                         "(warning only; the Ozon Sales Overview may show stale numbers).")
 
     # 8. Update TASKS.md
     summary = (

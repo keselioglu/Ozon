@@ -499,3 +499,12 @@ def test_daily_tab_renders_in_real_tk():
         tab._cancel_timer()
     finally:
         root.destroy()
+
+
+def test_account_snapshot_step_is_warning_only():
+    assert ui.step_level({"script": "account_snapshot.py", "status": "failed"}) == "warning"
+    assert ui.step_level({"script": "account_snapshot.py", "status": "timeout"}) == "warning"
+    assert ui.step_level({"name": "Account snapshot (account_snapshot.py)", "status": "failed"}) == "warning"
+    assert ui.step_level({"script": "account_snapshot.py", "status": "ok"}) == "good"
+    assert ui.step_level({"script": "upload_to_ozon.py", "status": "failed"}) == "critical"
+    assert ui.step_level({"script": "crawler.py", "status": "timeout"}) == "critical"
