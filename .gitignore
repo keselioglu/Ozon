@@ -39,3 +39,4 @@ category_inventory.json
 category_inventory.refreshing
 .category_inventory_*.tmp
 upload_skipped_offsets.json
+content_rating_snapshot.json
