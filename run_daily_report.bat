@@ -1,7 +1,13 @@
 @echo off
-REM Launcher for Windows Task Scheduler — runs the 10am business report.
-REM Task Scheduler runs with no shell profile, so this sets cwd and calls the
-REM interpreter by full path explicitly rather than relying on PATH.
-
+REM Daily 10:00 - business report + Telegram summary (daily_report.py)
+REM Task Scheduler: MandsOzonDailyReport. Fixed 2026-11-24: used the old PC's Python (C:\Users\tugbe\...), never ran on this PC.
 cd /d "%~dp0"
-"C:\Users\tugbe\AppData\Local\Python\pythoncore-3.14-64\python.exe" daily_report.py
+set PYTHONUTF8=1
+set PY="C:\Users\Tugberk\AppData\Local\Programs\Python\Python314\python.exe"
+for /f %%d in ('powershell -NoProfile -Command "Get-Date -Format yyyy-MM-dd"') do set D=%%d
+set LOG=daily_report_%D%.log
+echo [%date% %time%] Starting daily_report.py >> %LOG%
+%PY% -u daily_report.py >> %LOG% 2>&1
+set RC=%errorlevel%
+echo [%date% %time%] Finished with exit code %RC% >> %LOG%
+exit /b %RC%
