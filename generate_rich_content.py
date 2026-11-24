@@ -37,9 +37,10 @@ re-hosting their logo would need the same image-hosting solution as the
 photo-crop/video/size-chart-image tasks (issues #4/#5/#8) -- once that
 hosting exists, a logo block can be added the same way.
 
-NOT part of daily_run.py -- a one-time content build. Pushing to live
-listings is a separate follow-up (build_rich_content_for_article below
-returns the JSON string; nothing here calls /v3/product/import).
+NOT part of daily_run.py -- a one-time content build (build_rich_content_for_article
+below returns the JSON string; nothing here calls /v3/product/import).
+New products are handled by the daily improve_content.py step
+(daily_run.py), which reuses this logic via content_media.py.
 """
 import json
 import sys

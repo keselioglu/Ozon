@@ -28,8 +28,8 @@ the "don't keep generated media sitting around after a successful push"
 pattern already established for videos.
 
 Not part of daily_run.py -- a one-time catalog push for the already-generated
-crops. New products going forward would need their own crops generated +
-pushed the same way (a follow-up, not handled here).
+crops. New products are handled by the daily improve_content.py step
+(daily_run.py), which reuses this logic via content_media.py.
 """
 import json
 import os

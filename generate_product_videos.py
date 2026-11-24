@@ -9,8 +9,9 @@ ffmpeg. Pushing the result live needs a public host for the generated .mp4/
 .jpg files, since Ozon's video attributes (21841 "Ozon.Video: link", 21845
 "Ozon.Video cover: link") are plain URL fields Ozon fetches from, not file
 uploads -- same blocker as generate_extra_photos.py (issue #8) and the size
-chart images (issue #5). This script produces local files only; uploading +
-pushing the URLs to Ozon is a follow-up once hosting is decided.
+chart images (issue #5). This script produces local files only; hosting is
+r2_storage.py and pushing is push_videos_to_ozon.py. New products are handled by the daily improve_content.py step
+(daily_run.py), which reuses this logic via content_media.py.
 
 Video approach: each photo gets a few seconds with a slow zoom-in (Ken
 Burns effect via ffmpeg's zoompan filter), photos are concatenated in

@@ -36,9 +36,10 @@ content does. size_charts.py's category tables are transposed here: each
 of its rows (one per size) becomes a column in the Ozon table; each of its
 measurement columns (Bel/Kalça/Göğüs/etc.) becomes one row.
 
-Not part of daily_run.py -- a one-time content build. Pushing live is a
-separate follow-up (this only builds and saves the JSON locally, then
-associates it with every relevant offer_id).
+Not part of daily_run.py -- a one-time content build (this only builds and
+saves the JSON locally, then associates it with every relevant offer_id).
+New products are handled by the daily improve_content.py step
+(daily_run.py), which reuses this logic via content_media.py.
 """
 import json
 import sys

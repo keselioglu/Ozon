@@ -27,6 +27,11 @@ Scheduler once a day. Runs, in order:
      (rescan_campaign_margins.py).
   7b.6. Read-only catalog-wide margin report covering every live in-stock
      product, campaign or not (catalog_margin_report.py).
+  7b.7. Read-only content-rating snapshot (content_rating.py), then the
+     rating-driven content improvement job (improve_content.py): the
+     lowest-rated (article, color) groups get their missing photos / video /
+     rich content / size table / attributes as one merged, verified import
+     per offer_id, capped by a share of the daily_update quota.
   7c. Detect (log-only for now) any campaign product Ozon added
      automatically rather than through 7b (check_auto_added_campaign_products.py).
   8. Log to TASKS.md, commit & push.
@@ -47,6 +52,7 @@ All output is appended to daily_run_<date>.log (gitignored, like the other
 *_log.txt state files) so a run can be inspected after the fact even though
 Task Scheduler runs it headless.
 """
+import re
 import shutil
 import subprocess
 import sys
@@ -195,6 +201,27 @@ def plan_progress_line():
         return f"plan {created}/{plan_total} created"
     except Exception as e:
         return f"plan status unknown ({e})"
+
+
+def _done_line(output):
+    """The first line of a step's output that starts with "Done.", or ""."""
+    return next((l.strip() for l in (output or "").splitlines() if l.startswith("Done.")), "")
+
+
+def content_summary(rating_done, improve_done):
+    """Short summary-line fragment from the 'Done.' lines of content_rating.py
+    ("Done. N rated, avg X.X, M below 80.") and improve_content.py
+    ("Done. G groups / O offers improved ..."), e.g.
+    "content: avg 63.2, 120 groups improved". A missing / unparseable part
+    reads "status unknown"."""
+    m = re.search(r"\bavg ([0-9]+(?:\.[0-9]+)?|n/a)\b", rating_done or "")
+    avg = m.group(1) if m else None
+    m = re.match(r"Done\. (\d+) groups\b", improve_done or "")
+    groups = m.group(1) if m else None
+    if avg is None and groups is None:
+        return "content status unknown"
+    return (f"content: {'avg ' + avg if avg is not None else 'rating status unknown'}, "
+            f"{groups + ' groups improved' if groups is not None else 'improvement status unknown'}")
 
 
 def update_tasks_md(summary_line):
@@ -388,6 +415,23 @@ def main():
         if not done_line.rstrip(".").endswith("0 flagged (ratio > 46%)"):
             attention.append(f"Catalog-wide margin risk found (report only, not acted on): {done_line}")
 
+    # 7b.7. Content rating snapshot (read-only) + rating-driven content
+    # improvement (task #39). Neither step fails the run: a failure or
+    # timeout just leaves "status unknown" in the summary.
+    ok, rating_output = run_step(
+        "Content rating (content_rating.py)",
+        ["content_rating.py"], timeout=1800)
+    rating_done = _done_line(rating_output) if ok else ""
+    if not ok:
+        attention.append("Content rating step failed — see log for details.")
+    ok, improve_output = run_step(
+        "Content improvement (improve_content.py)",
+        ["improve_content.py"], timeout=3600)
+    improve_done = _done_line(improve_output) if ok else ""
+    if not ok:
+        attention.append("Content improvement step failed — see log for details.")
+    counts["content_summary"] = content_summary(rating_done, improve_done)
+
     # 7c. Detect (log-only, does not remove yet -- see module docstring)
     # any campaign-enrolled product Ozon added automatically rather than
     # through our own enroll_campaigns.py (business instruction,
@@ -420,7 +464,8 @@ def main():
         f"{counts.get('price_summary', 'price refresh status unknown')}, "
         f"{counts.get('campaign_summary', 'campaign enrollment status unknown')}, "
         f"{counts.get('margin_rescan_summary', 'margin re-scan status unknown')}, "
-        f"{counts.get('catalog_margin_summary', 'catalog margin report status unknown')}"
+        f"{counts.get('catalog_margin_summary', 'catalog margin report status unknown')}, "
+        f"{counts.get('content_summary', 'content status unknown')}"
     )
     update_tasks_md(summary)
     git_commit_and_push(f"Daily run log: {TODAY}")

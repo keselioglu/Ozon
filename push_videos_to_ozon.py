@@ -37,8 +37,8 @@ images are carried through unchanged from the live record (same safe
 pattern as push_hashtag_fixes.py).
 
 Not part of daily_run.py -- a one-time catalog push for the already-
-generated videos. New products going forward would need their own video
-generated + pushed the same way (a follow-up, not handled here).
+generated videos. New products are handled by the daily improve_content.py step
+(daily_run.py), which reuses this logic via content_media.py.
 """
 import json
 import os

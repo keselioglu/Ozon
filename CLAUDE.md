@@ -62,10 +62,17 @@ never in a database.
     that's drifted past the margin threshold.
 11. **Catalog margin report** (`catalog_margin_report.py`) — read-only, covers
     every live in-stock product, campaign or not.
-12. **Auto-added campaign check** (`check_auto_added_campaign_products.py`) —
+12. **Content rating** (`content_rating.py`, 1800s timeout) — read-only
+    snapshot of Ozon's per-SKU content rating. See Content rating below.
+13. **Content improvement** (`improve_content.py`, 3600s timeout) — builds
+    and pushes the missing content for the lowest-rated (article, color)
+    groups. Neither content step fails the run; a failure/timeout shows as
+    `content status unknown` in the summary line, otherwise e.g.
+    `content: avg 63.2, 120 groups improved`.
+14. **Auto-added campaign check** (`check_auto_added_campaign_products.py`) —
     detects (log-only) any campaign product Ozon added itself
     (`add_mode != "MANUAL"`) rather than through step 9. See note below.
-13. Log to `TASKS.md`, commit & push, post summary to GitHub issue #13.
+15. Log to `TASKS.md`, commit & push, post summary to GitHub issue #13.
 
 Other scheduled tasks (Windows Task Scheduler): `MandsOzonQuotaTopup` (5am),
 `MandsOzonTodaysStockCheck` (6am, runs `check_todays_stock.py` — a narrower,
@@ -168,6 +175,36 @@ logs this (to `auto_added_campaign_products.jsonl`) — the actual removal call
 pending a business decision on whether removal should be unconditional or
 gated by the same margin check as everything else. Don't add it without
 re-confirming which behavior is wanted.
+
+## Content rating (`content_rating.py`, `improve_content.py`)
+
+- **Rating endpoint**: `POST /v1/product/rating-by-sku` (≤100 SKUs per call;
+  SKUs resolved via `/v3/product/info/list`, flat response). Each group
+  (media / important_attributes / other_attributes / text) carries its
+  unmet `conditions` and `improve_attributes`. `content_rating.py` is
+  read-only: `content_rating_snapshot.json` (overwritten) +
+  `content_rating_history.jsonl` (one line per run).
+- **Single-item push + re-read**: `improve_content.py` sends ONE merged
+  `/v3/product/import` item per offer_id (photos, video 21841/21837, rich
+  content 11254, size table 13164, attributes together), one item at a time,
+  and verifies by re-reading the product. A group stops on its first failed
+  push and is retried another day. Actions are always derived from the live
+  record, so re-runs are safe. MS- offer_ids only.
+- **daily_update share**: the job uses at most `CONTENT_UPDATE_SHARE` (50%)
+  of the *remaining* `daily_update` quota from `/v4/product/info/limit`,
+  re-checked before each group, so `upload_to_ozon.py` (4am, 5am top-up,
+  10:15 fill) keeps its headroom. Also capped by `--limit-groups` (150) and
+  `--max-minutes` (50), with a 7-day per-group cooldown.
+- **No fabrication in attributes** (`content_attributes.py`): dictionary
+  attributes only take ids from Ozon's real dictionary (cached); protected /
+  managed-elsewhere attributes are never touched; country of origin,
+  certifications, warranty, measurements and codes are never filled; free
+  text with percentages, measurements, links or Latin text is rejected. If
+  unsure, leave it unset. Media is derived from real M&S photos only (zoom
+  crops, slideshow video) — no AI-generated product images.
+- **R2 cleanup**: once every offer_id of a group is verified, the group's
+  generated files are deleted locally AND on R2 (business instruction
+  2026-08-27). A group with a failed offer keeps its files for the retry.
 
 ## Warehouse routing (`warehouse_routing.py`)
 

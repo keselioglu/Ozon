@@ -14,9 +14,9 @@ imagery available without commissioning new photography.
 NOT YET WIRED INTO upload_to_ozon.py — generated crops need to be hosted at
 a public URL before Ozon's /v3/product/import can reference them (Ozon
 fetches from the URL you give it; it doesn't accept file uploads through
-this endpoint), and this pipeline has no image-hosting mechanism yet. This
-script only produces local files today; wiring them into the live pipeline
-is a follow-up once hosting is set up.
+this endpoint). This script only produces local files; hosting is
+r2_storage.py and pushing is push_extra_photos_to_ozon.py. New products are handled by the daily improve_content.py step
+(daily_run.py), which reuses this logic via content_media.py.
 
 Crop strategy: for each product with fewer than TARGET_PHOTO_COUNT real
 photos, cycle through its existing photos generating center-zoom crops at

@@ -53,3 +53,4 @@ How this works: add new tasks under **Todo**. When we start one, it moves to **I
 - ~~Translate 24 products (6 underwear + 18 tank top) to Russian per Ozon content policy~~ — 2026-08-25
 - ~~Upload 247 products live to Ozon~~ — 2026-08-25
 - ~~Build stock sync script (real M&S counts, 20pc fallback)~~ — 2026-08-25
+- ~~#39 Daily rating-driven content improvement: content_rating.py snapshot (#40), content_media.py refactor (#41), content_attributes.py filler (#42), improve_content.py (#43), wired into daily_run.py + summary line + CLAUDE.md (#44)~~ — 2026-11-24
