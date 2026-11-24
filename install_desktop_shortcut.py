@@ -1,15 +1,19 @@
 """
-Creates (or refreshes) %USERPROFILE%\\Desktop\\Ozon Daily Planner.lnk, which
-opens planner_ui.pyw with the pythonw.exe next to this interpreter.
+Creates (or refreshes) %USERPROFILE%\\Desktop\\Ozon Sales.lnk, which opens
+the tabbed "Ozon Sales" app (planner_ui.pyw) with the pythonw.exe next to
+this interpreter.
 
 Uses the WScript.Shell COM object via `powershell -NoProfile -Command`, so
-no extra Python packages are needed. Idempotent: running it again just
-rewrites the same shortcut. Prints the shortcut path.
+no extra Python packages are needed. Only after the new shortcut exists are
+the legacy Desktop shortcuts (LEGACY_SHORTCUT_NAMES, i.e. the old
+"Ozon Daily Planner.lnk") deleted, so the owner always keeps a working icon.
+Idempotent: running it again just rewrites the same shortcut and finds
+nothing left to remove. Prints the shortcut path.
 
     python install_desktop_shortcut.py              # app in this script's folder
     python install_desktop_shortcut.py --repo PATH  # app in another checkout
 
-Local only -- touches nothing but the .lnk file.
+Local only -- touches nothing but the .lnk files.
 """
 import argparse
 import os
@@ -17,12 +21,17 @@ import subprocess
 import sys
 from pathlib import Path
 
-SHORTCUT_NAME = "Ozon Daily Planner.lnk"
+SHORTCUT_NAME = "Ozon Sales.lnk"
+LEGACY_SHORTCUT_NAMES = ("Ozon Daily Planner.lnk",)
 APP_FILE = "planner_ui.pyw"
 
 
-def shortcut_path():
-    return Path(os.environ.get("USERPROFILE") or Path.home()) / "Desktop" / SHORTCUT_NAME
+def shortcut_path(name=SHORTCUT_NAME):
+    return Path(os.environ.get("USERPROFILE") or Path.home()) / "Desktop" / name
+
+
+def legacy_shortcut_paths():
+    return [shortcut_path(n) for n in LEGACY_SHORTCUT_NAMES]
 
 
 def pythonw_exe():
@@ -43,13 +52,13 @@ def build_ps_command(lnk, target, app, workdir):
         "$s.Arguments = " + _ps_quote(f'"{app}"'),
         "$s.WorkingDirectory = " + _ps_quote(workdir),
         "$s.IconLocation = " + _ps_quote(f"{target},0"),
-        "$s.Description = 'Ozon Daily Planner (M&S -> Ozon daily new-offer plan)'",
+        "$s.Description = 'Ozon Sales (M&S -> Ozon sales app: overview, daily tasks, prioritization)'",
         "$s.Save()",
     ])
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Create the Ozon Daily Planner Desktop shortcut.")
+    ap = argparse.ArgumentParser(description="Create the Ozon Sales Desktop shortcut (and remove the old Ozon Daily Planner one).")
     ap.add_argument("--repo", default=str(Path(__file__).resolve().parent),
                     help="folder that holds planner_ui.pyw (default: this script's folder)")
     args = ap.parse_args(argv)
@@ -67,6 +76,14 @@ def main(argv=None):
         print(f"Could not create the shortcut: {(p.stderr or p.stdout).strip()}")
         return 1
     print(lnk)
+    for old in legacy_shortcut_paths():
+        if old == lnk or not old.exists():
+            continue
+        try:
+            old.unlink()
+            print(f"Removed old shortcut {old}")
+        except OSError as e:
+            print(f"Warning: could not remove old shortcut {old}: {e}")
     return 0
 
 

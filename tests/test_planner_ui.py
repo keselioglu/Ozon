@@ -242,7 +242,78 @@ def test_shortcut_ps_command_quotes_paths():
     assert "O''Neil" in cmd
     assert "$s.Arguments = '\"C:\\repo\\planner_ui.pyw\"'" in cmd
     assert "$s.WorkingDirectory = 'C:\\repo'" in cmd
-    assert inst.shortcut_path().name == "Ozon Daily Planner.lnk"
+    assert inst.shortcut_path().name == "Ozon Sales.lnk"
+
+
+class _FakeRun:
+    """Stands in for subprocess.run: records argv, optionally writes the .lnk."""
+
+    def __init__(self, lnk, returncode=0):
+        self.lnk, self.returncode, self.calls = lnk, returncode, []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append(argv)
+        if self.returncode == 0:
+            self.lnk.write_bytes(b"lnk")
+        return type("P", (), {"returncode": self.returncode, "stdout": "", "stderr": ""})()
+
+
+def _shortcut_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    desktop = tmp_path / "Desktop"
+    desktop.mkdir()
+    legacy = desktop / "Ozon Daily Planner.lnk"
+    legacy.write_bytes(b"old")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "planner_ui.pyw").write_text("", encoding="utf-8")
+    return desktop, legacy, repo
+
+
+def test_shortcut_main_creates_new_and_removes_legacy_idempotent(monkeypatch, tmp_path):
+    import install_desktop_shortcut as inst
+    desktop, legacy, repo = _shortcut_env(monkeypatch, tmp_path)
+    fake = _FakeRun(desktop / "Ozon Sales.lnk")
+    monkeypatch.setattr(inst.subprocess, "run", fake)
+    assert inst.main(["--repo", str(repo)]) == 0
+    assert (desktop / "Ozon Sales.lnk").exists()
+    assert not legacy.exists()
+    cmd = " ".join(fake.calls[0])
+    assert "Ozon Sales.lnk" in cmd and "planner_ui.pyw" in cmd
+    # (b) second run: nothing left to remove, same shortcut rewritten
+    assert inst.main(["--repo", str(repo)]) == 0
+    assert len(fake.calls) == 2
+    assert (desktop / "Ozon Sales.lnk").exists()
+
+
+def test_shortcut_main_failure_keeps_legacy(monkeypatch, tmp_path):
+    import install_desktop_shortcut as inst
+    desktop, legacy, repo = _shortcut_env(monkeypatch, tmp_path)
+    fake = _FakeRun(desktop / "Ozon Sales.lnk", returncode=1)
+    monkeypatch.setattr(inst.subprocess, "run", fake)
+    assert inst.main(["--repo", str(repo)]) == 1
+    assert legacy.exists()
+    assert not (desktop / "Ozon Sales.lnk").exists()
+
+
+def test_shortcut_legacy_removal_error_still_succeeds(monkeypatch, tmp_path):
+    import install_desktop_shortcut as inst
+    desktop, legacy, repo = _shortcut_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(inst.subprocess, "run", _FakeRun(desktop / "Ozon Sales.lnk"))
+
+    def boom(self, *a, **k):
+        raise OSError("locked")
+    monkeypatch.setattr(inst.Path, "unlink", boom)
+    assert inst.main(["--repo", str(repo)]) == 0
+    assert legacy.exists()
+
+
+def test_shortcut_names(monkeypatch, tmp_path):
+    import install_desktop_shortcut as inst
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    assert inst.shortcut_path().name == "Ozon Sales.lnk"
+    assert inst.shortcut_path().parent == tmp_path / "Desktop"
+    assert [p.name for p in inst.legacy_shortcut_paths()] == ["Ozon Daily Planner.lnk"]
 
 
 # --- tabbed shell -------------------------------------------------------------

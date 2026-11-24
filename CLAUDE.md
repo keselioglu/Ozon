@@ -91,12 +91,16 @@ vs. plan, content, stock/campaigns/sales); it needs `TELEGRAM_BOT_TOKEN` /
 `TELEGRAM_CHAT_ID` in `.env`, otherwise it logs "Telegram not sent: not
 configured".
 
-**Planner app** (`planner_ui.pyw`, Desktop shortcut "Ozon Daily Planner" via
-`install_desktop_shortcut.py`): tkinter view of quota / plan / pool per
-brand × category, and the editor for `daily_plan.json`. It is read-only
-toward Ozon (only `/v4/product/info/limit`; the upload only runs as
-`--dry-run`) — keep it that way, uploads belong to the scheduled runs. See
-"Daily plan & planner UI" below.
+**Ozon Sales app** (`planner_ui.pyw`, Desktop shortcut "Ozon Sales" via
+`install_desktop_shortcut.py`): a tabbed tkinter window with three tabs —
+Overview, Daily tasks and Prioritization. The planner (view of quota / plan /
+pool per brand × category, and the editor for `daily_plan.json`) lives on the
+Prioritization tab, which the app opens on. New tabs plug in through
+`planner_ui.register_tab(name, builder)` (`builder(app, parent_frame)`; tabs
+must hand UI updates back through `app.post`, never touch Tk from a thread).
+The whole app is read-only toward Ozon (only `/v4/product/info/limit`; the
+upload only runs as `--dry-run`) — keep it that way, including in new tabs;
+uploads belong to the scheduled runs. See "Daily plan & planner UI" below.
 
 ## Daily plan & planner UI (`daily_plan.py`, `planner_ui.pyw`)
 
@@ -151,13 +155,15 @@ same unit as `daily_create`), not the whole 2000/day quota.
   every product page of every supported category, so it's slow and puts
   load on the M&S site. It only runs when the owner clicks it in the UI,
   never automatically.
-- **Launching the app:** double-click "Ozon Daily Planner" on the Desktop, or
+- **Launching the app:** double-click "Ozon Sales" on the Desktop, or
   run `pythonw planner_ui.pyw` from the repo root. To create or reinstall
   the shortcut, run `python install_desktop_shortcut.py` (add
   `--repo PATH` if the app is in another checkout). It's idempotent and
-  rewrites `%USERPROFILE%\Desktop\Ozon Daily Planner.lnk`, using the
+  rewrites `%USERPROFILE%\Desktop\Ozon Sales.lnk`, using the
   `pythonw.exe` next to the interpreter that runs it, so run it with the
-  Python that should open the app. The app runs all network calls and
+  Python that should open the app. Once the new shortcut exists, the
+  installer removes the old `Ozon Daily Planner.lnk` from the Desktop (if
+  creating the new one fails, the old one is left alone). The app runs all network calls and
   subprocesses off the Tk main thread, so the window doesn't freeze.
 
 ## Task status (`task_status.py`)
