@@ -5,6 +5,7 @@ as a product under Clothing > Underwear > Underwear Trunks/Panties(/Set).
 Every mapping decision (size, color) is logged to mapping_log.jsonl for audit,
 even though this runs fully automatically without pausing for confirmation.
 """
+import argparse
 import json
 import os
 import re
@@ -18,6 +19,7 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+import daily_plan
 from color_dedup import classify_english_color, is_clearly_different_color, offer_id_color_families
 from ozon_client import call
 from ozon_mapping import (
@@ -357,18 +359,83 @@ def is_color_duplicate_risk(article_code, new_color, live_offer_ids_by_article):
     return False
 
 
-def load_deferred_items():
+def load_deferred_items(consume=True):
     try:
         with open(DEFERRED_LOG, "r", encoding="utf-8") as f:
             items = json.load(f)
-        os.remove(DEFERRED_LOG)  # consumed — today's run will re-defer whatever still doesn't fit
+        if consume:
+            os.remove(DEFERRED_LOG)  # consumed — today's run will re-defer whatever still doesn't fit
         return items
     except FileNotFoundError:
         return []
 
 
-def main():
-    deferred_items = load_deferred_items()
+def log_skip(row, reasons, dry_run=False):
+    if dry_run:
+        return
+    with open(SKIPPED_LOG, "a", encoding="utf-8") as f:
+        f.write(json.dumps({
+            "sku": row.get("variant_sku"), "name": row.get("name"),
+            "reasons": reasons,
+        }, ensure_ascii=False) + "\n")
+
+
+def plan_key(item):
+    """(brand, category label) for daily_plan.apply_cap -- category from the
+    item's own type_id, brand from its offer_id prefix (MS- -> 'M&S')."""
+    return (daily_plan.brand_for_offer_id(item.get("offer_id")),
+            daily_plan.category_label_for_type(item.get("type_id")))
+
+
+def _fmt_key(key):
+    brand, label = key
+    label = label or "Unmapped"
+    return label if brand == "M&S" else f"{brand} {label}"
+
+
+def cap_new_items_by_plan(new_items, quota_remaining, today=None, plan_path=daily_plan.PLAN_FILE,
+                          new_items_log=NEW_ITEMS_LOG, products_csv=PRODUCTS_CSV):
+    """Hard daily cap on NEW offers: min(Ozon quota left, plan left), split per
+    category as daily_plan.json says. quota_remaining=None (quota read failed)
+    still applies the plan cap. Returns (accepted, capped), both in the
+    original priority order."""
+    today = today or daily_plan.utc_today()
+    plan = daily_plan.load_plan(plan_path)
+    day = daily_plan.plan_for_date(plan, today)
+    created_total, created_by_cat = daily_plan.created_today(new_items_log, today, products_csv)
+    remaining = daily_plan.remaining_today(plan, quota_remaining, created_total, created_by_cat, today)
+
+    parts = [f"{_fmt_key(k)} {n} left" for k, n in remaining["per_category"].items()]
+    rest = ("rest filled in priority order" if remaining["fill_remainder"]
+            else "nothing beyond the allocations")
+    cats = f"{', '.join(parts)}; {rest}" if parts else f"no per-category allocations, {rest}"
+    print(f"Plan {today}: {day['total']}/day, {created_total} created so far; {cats}.")
+    plan_left = max(0, day["total"] - created_total)
+    quota_text = quota_remaining if quota_remaining is not None else "unknown"
+    print(f"Capping at {plan_left} (plan) / {quota_text} (quota) "
+          f"-> at most {remaining['total']} new offer(s) this run.")
+
+    accepted, capped = daily_plan.apply_cap(new_items, remaining, plan_key)
+    split = {}
+    for it in accepted:
+        k = _fmt_key(plan_key(it))
+        split[k] = split.get(k, 0) + 1
+    split_text = ", ".join(f"{k} {n}" for k, n in sorted(split.items(), key=lambda kv: -kv[1]))
+    print(f"Split: {len(accepted)} new accepted ({split_text or 'none'}), "
+          f"{len(capped)} capped -> {DEFERRED_LOG}.\n")
+    return accepted, capped
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Upload crawled M&S products to Ozon.")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print today's plan split and exit before submitting anything "
+                             "(no /v3/product/import, no log/deferred file writes).")
+    dry_run = parser.parse_args(argv).dry_run
+    if dry_run:
+        print("DRY RUN: nothing will be submitted to Ozon and no files will be written.\n")
+
+    deferred_items = load_deferred_items(consume=not dry_run)
     if deferred_items:
         print(f"Resuming {len(deferred_items)} item(s) deferred from a previous run (quota-capped).\n")
 
@@ -398,11 +465,7 @@ def main():
                 f"({', '.join(sorted(live_prefixes - {'MS'}))}) — skipping to avoid a duplicate listing, "
                 "even though the color/size may differ."
             )
-            with open(SKIPPED_LOG, "a", encoding="utf-8") as f:
-                f.write(json.dumps({
-                    "sku": row.get("variant_sku"), "name": row.get("name"),
-                    "reasons": [reason],
-                }, ensure_ascii=False) + "\n")
+            log_skip(row, [reason], dry_run)
             print(f"SKIP {row.get('variant_sku')} ({row.get('name')}): {reason}")
             continue
 
@@ -420,22 +483,14 @@ def main():
                 f"{row.get('color')!r} under a different naming convention (Turkish/English) — "
                 "skipping to avoid a possible duplicate listing."
             )
-            with open(SKIPPED_LOG, "a", encoding="utf-8") as f:
-                f.write(json.dumps({
-                    "sku": row.get("variant_sku"), "name": row.get("name"),
-                    "reasons": [reason],
-                }, ensure_ascii=False) + "\n")
+            log_skip(row, [reason], dry_run)
             print(f"SKIP {row.get('variant_sku')} ({row.get('name')}): {reason}")
             continue
 
         item, warnings = build_ozon_item(row)
         if item is None:
             skipped += 1
-            with open(SKIPPED_LOG, "a", encoding="utf-8") as f:
-                f.write(json.dumps({
-                    "sku": row.get("variant_sku"), "name": row.get("name"),
-                    "reasons": warnings,
-                }, ensure_ascii=False) + "\n")
+            log_skip(row, warnings, dry_run)
             print(f"SKIP {row.get('variant_sku')} ({row.get('name')}): {'; '.join(warnings)}")
             continue
         if warnings:
@@ -460,17 +515,24 @@ def main():
     print(f"  {len(new_items)} new product(s) to create, {len(update_items)} existing to update.\n")
 
     quota = check_quota()
-    deferred = []
+    quota_remaining = None
     if quota:
         daily_create = quota.get("daily_create", {})
-        remaining = daily_create.get("limit", 0) - daily_create.get("usage", 0)
+        quota_remaining = daily_create.get("limit", 0) - daily_create.get("usage", 0)
         print(f"Daily create quota: {daily_create.get('usage')}/{daily_create.get('limit')} used, "
-              f"{remaining} remaining (resets {daily_create.get('reset_at')}).")
-        if len(new_items) > remaining:
-            deferred = new_items[remaining:]
-            new_items = new_items[:remaining]
-            print(f"Capping today's new-product uploads at {remaining} (quota). "
-                  f"{len(deferred)} deferred to {DEFERRED_LOG} — re-run after the quota resets.\n")
+              f"{quota_remaining} remaining (resets {daily_create.get('reset_at')}).")
+
+    # Hard daily cap from daily_plan.json (task #34): new creates are limited to
+    # min(quota left, plan left), split per category. Still applies when the quota
+    # read failed (quota_remaining None -> plan total only). Updates never use
+    # daily_create, so update_items are never capped. Capped items go to
+    # DEFERRED_LOG below and are sorted first on the next run.
+    new_items, deferred = cap_new_items_by_plan(new_items, quota_remaining)
+
+    if dry_run:
+        print(f"DRY RUN: would submit {len(new_items)} new + {len(update_items)} update(s), "
+              f"{len(deferred)} would be deferred. Exiting before upload.")
+        return
 
     to_upload = update_items + new_items
 
