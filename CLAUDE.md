@@ -79,6 +79,12 @@ crawling). The 5am top-up and 10:15 fill both run `upload_to_ozon.py`, so
 they share the same daily plan cap as the 4am run. The daily TASKS.md /
 GitHub summary line includes `plan N/500 created`.
 
+**Planner app** (`planner_ui.pyw`, Desktop shortcut "Ozon Daily Planner" via
+`install_desktop_shortcut.py`): tkinter view of quota / plan / pool per
+brand × category, and the editor for `daily_plan.json`. It is read-only
+toward Ozon (only `/v4/product/info/limit`; the upload only runs as
+`--dry-run`) — keep it that way, uploads belong to the scheduled runs.
+
 ## Category/type mapping (`ozon_mapping.py`)
 
 `resolve_category_and_type(name, is_set_hint)` is the single source of truth
