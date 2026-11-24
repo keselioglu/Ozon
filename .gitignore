@@ -34,3 +34,5 @@ __pycache__/
 .venv/
 _temp_*
 sample_page*.html
+daily_plan.json
+category_inventory.json
