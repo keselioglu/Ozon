@@ -40,3 +40,5 @@ category_inventory.refreshing
 .category_inventory_*.tmp
 upload_skipped_offsets.json
 content_rating_snapshot.json
+content_attr_schema_cache.json
+content_attr_values_cache.json
