@@ -90,7 +90,70 @@ GitHub summary line includes `plan N/500 created`.
 `install_desktop_shortcut.py`): tkinter view of quota / plan / pool per
 brand × category, and the editor for `daily_plan.json`. It is read-only
 toward Ozon (only `/v4/product/info/limit`; the upload only runs as
-`--dry-run`) — keep it that way, uploads belong to the scheduled runs.
+`--dry-run`) — keep it that way, uploads belong to the scheduled runs. See
+"Daily plan & planner UI" below.
+
+## Daily plan & planner UI (`daily_plan.py`, `planner_ui.pyw`)
+
+Business instruction, 2026-11-24 (task #32): create at most **500 new offers
+per day** (the unit is new Ozon offer_ids, one per color/size variant, the
+same unit as `daily_create`), not the whole 2000/day quota.
+
+- **`daily_plan.json`** (gitignored, written only by `daily_plan.save_plan()`,
+  which validates it and writes it atomically). Schema:
+  `{"version": 1, "default": {"total": 500, "allocations": {"M&S":
+  {"Pajama": 120, ...}}, "fill_remainder": true}, "overrides":
+  {"YYYY-MM-DD": <same shape as default>}, "updated_at": ...}`. `total` is an
+  int from 0 to 2000 (`MAX_TOTAL`), and allocations must not add up to more
+  than `total`. If the file is missing, corrupt or invalid, `load_plan()`
+  falls back to the built-in default (`DEFAULT_TOTAL = 500`, no allocations,
+  fill_remainder on) and never raises.
+- **Dates are UTC** (`daily_plan.utc_today()`), the same date stamp as
+  `new_items_submitted.json`. The cap covers all of that UTC day's runs
+  together (4am, 5am top-up, 10:15 fill). `plan_for_date()` returns the
+  date's override if there is one, otherwise `default`. Unused plan doesn't
+  carry over to the next day.
+- **The upload is the hard cap.** `upload_to_ozon.cap_new_items_by_plan()`
+  limits new creates to min(Ozon `daily_create` left, plan left), minus what
+  `created_today()` already counts in `new_items_submitted.json`. Pass 1 fills
+  the per-category allocations. Pass 2 fills the rest in priority order, only
+  when `fill_remainder` is on. Anything over the cap goes to
+  `deferred_items.json` and goes first on the next run. If the quota read
+  fails (`None`), the plan cap still applies. Updates to existing offers
+  aren't capped. Discovery (`category_priority.py`) and
+  `fill_remaining_quota.py` only *aim* at the plan (discovery aims 1.2× over
+  because dedup drops some). Never treat their numbers as the limit.
+- **"Category" = the Ozon product type label** from
+  `daily_plan.CATEGORY_LABELS`, keyed by the `type_id` that
+  `ozon_mapping.resolve_category_and_type()` already picks (Underwear,
+  Underwear Set, Tank Top, Pajama, T-Shirt, Socks, Sweater, Trousers, Blouse,
+  Skirt, Jacket, Dress, Top). We use these instead of the ~428 M&S site
+  categories in `category_priority.csv` because the site categories overlap
+  (e.g. "Külot" / "Yeni Gelen Külotlar"), so you can't allocate against
+  them. Site sections are drill-down info only. A new product type needs a
+  `CATEGORY_LABELS` entry, or it can only enter through `fill_remainder`.
+  Offers whose category can't be resolved (e.g. `products.csv` is locked by
+  Excel) count toward the total only.
+- **H&M can't be added yet.** Brand comes from the offer_id prefix
+  (`brand_for_offer_id()`: M&S / H&M / Other). H&M shows on the planner with
+  its live/for-sale numbers, but its row is read-only ("no add pipeline
+  yet"). The only H&M code is a stock refresh: there's no H&M crawl or
+  upload. Building that is a separate task.
+- **Pool numbers** come from `category_inventory.py` (a read-only snapshot
+  per brand × category: live / crawled-not-uploaded / found-not-live, saved
+  to `category_inventory.json`; H&M live/for-sale is copied from
+  `catalog_status.json`). `--walk` fetches
+  every product page of every supported category, so it's slow and puts
+  load on the M&S site. It only runs when the owner clicks it in the UI,
+  never automatically.
+- **Launching the app:** double-click "Ozon Daily Planner" on the Desktop, or
+  run `pythonw planner_ui.pyw` from the repo root. To create or reinstall
+  the shortcut, run `python install_desktop_shortcut.py` (add
+  `--repo PATH` if the app is in another checkout). It's idempotent and
+  rewrites `%USERPROFILE%\Desktop\Ozon Daily Planner.lnk`, using the
+  `pythonw.exe` next to the interpreter that runs it, so run it with the
+  Python that should open the app. The app runs all network calls and
+  subprocesses off the Tk main thread, so the window doesn't freeze.
 
 ## Category/type mapping (`ozon_mapping.py`)
 

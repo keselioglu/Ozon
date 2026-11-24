@@ -53,4 +53,5 @@ How this works: add new tasks under **Todo**. When we start one, it moves to **I
 - ~~Translate 24 products (6 underwear + 18 tank top) to Russian per Ozon content policy~~ — 2026-08-25
 - ~~Upload 247 products live to Ozon~~ — 2026-08-25
 - ~~Build stock sync script (real M&S counts, 20pc fallback)~~ — 2026-08-25
+- ~~#32 Daily plan of 500 new offers/day (replaces "fill the whole daily_create quota"): daily_plan.py plan file + allocation logic (#33), discovery and quota-fill aim for the plan (#35), category_inventory.py pool snapshot (#36), hard cap in upload_to_ozon.py with overflow to deferred_items.json (#34), planner_ui.pyw desktop app + Desktop shortcut installer (#37), CLAUDE.md 'Daily plan & planner UI' section + TASKS.md (#38)~~ — 2026-11-24
 - ~~#39 Daily rating-driven content improvement: content_rating.py snapshot (#40), content_media.py refactor (#41), content_attributes.py filler (#42), improve_content.py (#43), wired into daily_run.py + summary line + CLAUDE.md (#44)~~ — 2026-11-24
