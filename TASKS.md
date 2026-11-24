@@ -6,7 +6,10 @@ How this works: add new tasks under **Todo**. When we start one, it moves to **I
 
 ## Todo
 
-*(empty — add tasks here)*
+- MVP2 ideas for #52 (Ozon Sales app):
+  - Sales/revenue view
+  - Editing the `category_priority.csv` order from the app
+  - H&M add pipeline (crawl + upload, separate task)
 
 ---
 
@@ -56,3 +59,5 @@ How this works: add new tasks under **Todo**. When we start one, it moves to **I
 - ~~#32 Daily plan of 500 new offers/day (replaces "fill the whole daily_create quota"): daily_plan.py plan file + allocation logic (#33), discovery and quota-fill aim for the plan (#35), category_inventory.py pool snapshot (#36), hard cap in upload_to_ozon.py with overflow to deferred_items.json (#34), planner_ui.pyw desktop app + Desktop shortcut installer (#37), CLAUDE.md 'Daily plan & planner UI' section + TASKS.md (#38)~~ — 2026-11-24
 - ~~#39 Daily rating-driven content improvement: content_rating.py snapshot (#40), content_media.py refactor (#41), content_attributes.py filler (#42), improve_content.py (#43), wired into daily_run.py + summary line + CLAUDE.md (#44)~~ — 2026-11-24
 - ~~#55 'Ozon Sales' tabbed desktop app: planner_ui.pyw becomes a ttk.Notebook shell (Overview / Daily tasks / Prioritization) with a register_tab(name, builder) hook, planner moved as-is to the Prioritization tab (#63); install_desktop_shortcut.py creates 'Ozon Sales.lnk' and removes the legacy 'Ozon Daily Planner.lnk' only after the new one exists, CLAUDE.md + TASKS.md (#64)~~ — 2026-11-24
+- ~~#58 Account snapshot refreshed daily: account_snapshot.py wired into daily_run.py as a warning-only step (600s timeout) + Daily tasks tab shows its failure as a warning (#67), CLAUDE.md Ozon Sales app section + pipeline step, TASKS.md #52 notes (#68)~~ — 2026-11-24
+- ~~#52 Ozon Sales app MVP: tabbed app (#55/#63/#64), account_snapshot.py (#62) refreshed daily by daily_run.py (#58), task_status.py + view-only Daily tasks tab (#54/#65/#66), CLAUDE.md docs (#58)~~ — 2026-11-24

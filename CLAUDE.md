@@ -73,12 +73,14 @@ never in a database.
     detects (log-only) any campaign product Ozon added itself
     (`add_mode != "MANUAL"`) rather than through step 9. See note below.
 15. **Account snapshot** (`account_snapshot.py`, 600s timeout) — read-only,
-    offline: rebuilds `account_snapshot.json` (Ozon Sales Overview data) from
-    `catalog_status.json` / `catalog_live_offer_ids.json` /
-    `warehouse_assignments.json`. Warning-only: a failure/timeout is an
-    attention entry, never a failed run (and a warning on the Daily tasks
-    tab). Only as fresh as `catalog_status.json`, which daily_run doesn't
-    refresh.
+    offline: rebuilds `account_snapshot.json` (the Ozon Sales app's Overview
+    data: per-brand offers / for sale / products / articles / sizes / offers
+    by warehouse) from `catalog_status.json`, `catalog_live_offer_ids.json`
+    and `warehouse_assignments.json`. It never fails the run: a failure or
+    timeout is an attention line, and the Daily tasks tab shows it as a
+    warning. `catalog_status.json` itself is refreshed by `catalog_status.py`
+    (the app's button), not by daily_run, so the snapshot is only as fresh
+    as that file.
 16. Log to `TASKS.md`, commit & push, post summary to GitHub issue #13.
 
 Other scheduled tasks (Windows Task Scheduler): `MandsOzonQuotaTopup` (5am),
@@ -98,22 +100,33 @@ vs. plan, content, stock/campaigns/sales); it needs `TELEGRAM_BOT_TOKEN` /
 `TELEGRAM_CHAT_ID` in `.env`, otherwise it logs "Telegram not sent: not
 configured".
 
+## Ozon Sales app & daily plan (`planner_ui.pyw`, `daily_plan.py`)
+
 **Ozon Sales app** (`planner_ui.pyw`, Desktop shortcut "Ozon Sales" via
-`install_desktop_shortcut.py`): a tabbed tkinter window with three tabs —
-Overview, Daily tasks and Prioritization. The planner (view of quota / plan /
-pool per brand × category, and the editor for `daily_plan.json`) lives on the
-Prioritization tab, which the app opens on. The Overview tab reads
-`account_snapshot.json` (offers / for sale / products / articles per brand,
-warehouses, sizes, warning colour past 26h) plus `catalog_status.json`
-freshness. Its Refresh runs `account_snapshot.py`, which is offline and only
-writes that local file. New tabs plug in through
+`install_desktop_shortcut.py`, see "Launching the app" below): a tabbed
+tkinter window with three tabs:
+
+- **Overview**: account snapshot from `account_snapshot.json` (built daily by
+  `account_snapshot.py`, pipeline step 15): offers / for sale / products /
+  articles per brand, warehouses, sizes, warning colour past 26h, plus
+  `catalog_status.json` freshness. Its Refresh runs `account_snapshot.py`,
+  which is offline and only writes that local file.
+- **Daily tasks**: `task_status.py` → `schtasks /query /fo CSV /v` +
+  `daily_run_status.json`. View-only (see Task status below).
+- **Prioritization** (the app opens on this tab): the planner, i.e. the
+  `daily_plan.json` editor plus quota / plan / pool per brand × category
+  from `category_inventory.json`, `catalog_status.json` and the live
+  `/v4/product/info/limit` quota read.
+
+The app is read-only toward Ozon: only `/v4/product/info/limit`, plus the
+read-only `catalog_status.py` / `category_inventory.py` snapshots, and the
+upload only runs as `--dry-run`. It only *queries* Task Scheduler; it never
+creates, changes, runs or ends tasks. Keep it that way, including in new
+tabs; uploads belong to the scheduled runs. New tabs plug in through
 `planner_ui.register_tab(name, builder)` (`builder(app, parent_frame)`; tabs
 must hand UI updates back through `app.post`, never touch Tk from a thread).
-The whole app is read-only toward Ozon (only `/v4/product/info/limit`; the
-upload only runs as `--dry-run`) — keep it that way, including in new tabs;
-uploads belong to the scheduled runs. See "Daily plan & planner UI" below.
 
-## Daily plan & planner UI (`daily_plan.py`, `planner_ui.pyw`)
+The daily plan rules:
 
 Business instruction, 2026-11-24 (task #32): create at most **500 new offers
 per day** (the unit is new Ozon offer_ids, one per color/size variant, the
@@ -179,7 +192,7 @@ same unit as `daily_create`), not the whole 2000/day quota.
 
 ## Task status (`task_status.py`)
 
-Read-only status reader for the planner's "Daily tasks" view.
+Read-only status reader for the Ozon Sales app's "Daily tasks" tab.
 `collect_status(now=None)` never raises; errors go into `errors` /
 `tasks_error`. Scheduled tasks are found by name marker (`TASK_NAME_MARKERS`:
 `MandsOzon`, `OzonSales_`; the price/stock/H&M stock tasks behind `run_*.bat`
@@ -193,7 +206,8 @@ can be slow.
 The app's Daily tasks tab (`planner_ui.DailyTasksTab`) is view-only: its
 only button is Refresh, it re-collects every 60s on a worker thread (never
 two collects at once), and it shows a `recheck_stockouts` timeout as a
-warning, not a failure (every other step timeout is critical).
+warning, not a failure, and an `account_snapshot` failure or timeout as a
+warning too (every other step failure/timeout is critical).
 
 ## Category/type mapping (`ozon_mapping.py`)
 
