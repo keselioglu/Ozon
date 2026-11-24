@@ -10,9 +10,15 @@ names, same as the plan's allocation keys):
                                   submitted today -- ready for an upload
   deferred_offers                 offers waiting in deferred_items.json
   upload_skips_7d                 distinct SKUs upload_to_ozon skipped in the
-                                  last 7 days (upload_skipped.jsonl; only lines
-                                  with a "date" field count -- older lines
-                                  have none)
+                                  last 7 days (upload_skipped.jsonl). Its lines
+                                  carry no date, so a line counts if it has a
+                                  "date" within the window, or sits past the
+                                  byte offset recorded for the window's
+                                  earliest covered day in
+                                  upload_skipped_offsets.json (written by
+                                  --record-history). Until 7 days of offsets
+                                  exist this undercounts; the snapshot's
+                                  upload_skips_since says from when.
   discovered_not_live_products    products found on the M&S site but not live
   discovered_not_live_offers_est  their estimated in-stock offers
   last_discovery_walk             date of the walk those two numbers came from
@@ -33,9 +39,18 @@ Modes:
                                        every supported category): its own
                                        full read-only category walk for the
                                        discovered_* numbers. Queues nothing.
+  python category_inventory.py --record-history
+                                       local files only, no API, no snapshot:
+                                       appends the day's created totals to
+                                       daily_created_history.jsonl and notes
+                                       today's upload_skipped.jsonl size in
+                                       upload_skipped_offsets.json. Run by
+                                       daily_run.py at the start and end of
+                                       the 4am run.
 
 Never writes product_urls.txt, products.csv or deferred_items.json and
-never calls a write endpoint. Writes category_inventory.json atomically and
+never calls a write endpoint (--record-history writes only the two
+history files above). Writes category_inventory.json atomically and
 holds category_inventory.refreshing while it runs. The "discovery_found"
 key (written by category_priority.record_discovery_counts) is preserved.
 """
@@ -46,7 +61,6 @@ import os
 import re
 import sys
 import tempfile
-from collections import Counter
 from datetime import date as _date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -65,6 +79,7 @@ MARKER_SUFFIX = ".refreshing"
 PRODUCTS_CSV = "products.csv"
 DEFERRED_FILE = "deferred_items.json"
 SKIPPED_LOG = "upload_skipped.jsonl"
+SKIP_OFFSETS_FILE = "upload_skipped_offsets.json"
 NEW_ITEMS_LOG = "new_items_submitted.json"
 CATALOG_STATUS_FILE = "catalog_status.json"
 REPORT_HISTORY_FILE = "daily_report_history.jsonl"
@@ -135,10 +150,11 @@ def read_products_csv(path=PRODUCTS_CSV):
         return None, "locked"
 
 
-def iter_jsonl_reverse(path, block=1 << 20):
+def iter_jsonl_reverse(path, block=1 << 20, with_pos=False):
     """Parsed records of a JSONL file from the LAST line backwards, reading
     blocks from the end so a huge log (upload_skipped.jsonl is hundreds of
-    MB) costs only as much as the caller consumes. Bad lines are skipped."""
+    MB) costs only as much as the caller consumes. Bad lines are skipped.
+    with_pos=True yields (byte offset of the line's start, record)."""
     try:
         f = open(path, "rb")
     except OSError:
@@ -154,13 +170,16 @@ def iter_jsonl_reverse(path, block=1 << 20):
             chunk = f.read(step) + tail
             lines = chunk.split(b"\n")
             tail = lines.pop(0)  # possibly partial -- completed by the next block
+            cur = pos + len(chunk)  # end of the last line in this chunk
             for line in reversed(lines):
+                start = cur - len(line)
+                cur = start - 1  # skip the "\n" before this line
                 rec = _parse_line(line)
                 if rec is not None:
-                    yield rec
+                    yield (start, rec) if with_pos else rec
         rec = _parse_line(tail)
         if rec is not None:
-            yield rec
+            yield (0, rec) if with_pos else rec
 
 
 def _parse_line(line):
@@ -174,18 +193,41 @@ def _parse_line(line):
     return rec if isinstance(rec, dict) else None
 
 
-def recent_skip_records(path=SKIPPED_LOG, today=None, days=SKIP_DAYS):
-    """Skip records dated within the last `days` days (inclusive of today).
-    The log is append-only and chronological, so reading stops at the first
-    line (from the end) that is older or has no date at all."""
-    cutoff = (_date.fromisoformat(today or daily_plan.utc_today()) - timedelta(days=days - 1)).isoformat()
+def skip_window_start(offsets, today, days=SKIP_DAYS):
+    """(since_date, byte_offset) for the earliest day inside the last `days`
+    days that has a recorded upload_skipped.jsonl size, or (None, None)."""
+    cutoff = (_date.fromisoformat(today) - timedelta(days=days - 1)).isoformat()
+    inside = sorted(d for d, v in (offsets or {}).items()
+                    if isinstance(d, str) and cutoff <= d <= today and isinstance(v, int))
+    return (inside[0], offsets[inside[0]]) if inside else (None, None)
+
+
+def recent_skip_records(path=SKIPPED_LOG, today=None, days=SKIP_DAYS, offsets=None):
+    """Skip records from the last `days` days (inclusive of today). A line
+    with a "date" is judged by it; an undated line (upload_to_ozon writes
+    none) counts when it starts at/after the byte offset skip_window_start()
+    gives. The log is append-only and chronological, so reading stops at the
+    first line (from the end) that falls outside the window."""
+    today = today or daily_plan.utc_today()
+    cutoff = (_date.fromisoformat(today) - timedelta(days=days - 1)).isoformat()
+    _, start_off = skip_window_start(offsets, today, days)
     out = []
-    for rec in iter_jsonl_reverse(path):
+    for pos, rec in iter_jsonl_reverse(path, with_pos=True):
         d = rec.get("date")
-        if not isinstance(d, str) or d < cutoff:
+        if isinstance(d, str):
+            if d < cutoff:
+                break
+        elif start_off is None or pos < start_off:
             break
         out.append(rec)
     return out
+
+
+def file_size(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return None
 
 
 def report_history_added(path=REPORT_HISTORY_FILE):
@@ -242,6 +284,20 @@ def row_offer_id(row):
     return f"MS-{code}-{color}-{token}"
 
 
+def crawled_label_maps(product_rows, label):
+    """(article code -> label, parent_sku -> label) from crawled names."""
+    article_labels, parent_labels = {}, {}
+    for row in product_rows or []:
+        lbl = label(row.get("name"))
+        code = (row.get("ms_article_code") or "").strip()
+        psku = str(row.get("parent_sku") or "").strip()
+        if code and lbl and code not in article_labels:
+            article_labels[code] = lbl
+        if psku and lbl and psku not in parent_labels:
+            parent_labels[psku] = lbl
+    return article_labels, parent_labels
+
+
 def _last_n_dates(today, n):
     t = _date.fromisoformat(today)
     return [(t - timedelta(days=i)).isoformat() for i in range(n - 1, -1, -1)]
@@ -261,14 +317,9 @@ def build_created_history(today, created_log, report_added, new_items_log, artic
                          by_category=rec.get("by_category"), source="daily_created_history")
         elif d in report_added:
             entry.update(created_total=report_added[d], source="daily_report_history")
-        if (d == today and isinstance(new_items_log, dict) and new_items_log.get("date") == today):
-            ids = [o for o in new_items_log.get("new_offer_ids") or [] if isinstance(o, str)]
-            if len(ids) >= (entry["created_total"] or 0):
-                by_cat = Counter()
-                for oid in ids:
-                    by_cat[article_labels.get(extract_article_code_from_offer_id(oid)) or UNMAPPED] += 1
-                entry.update(created_total=len(ids), by_category=dict(sorted(by_cat.items())),
-                             source="new_items_submitted")
+        summary = created_history.summarize_new_items(new_items_log, article_labels)
+        if d == today and summary and summary[0] == today and summary[1] >= (entry["created_total"] or 0):
+            entry.update(created_total=summary[1], by_category=summary[2], source="new_items_submitted")
         out.append(entry)
     return out
 
@@ -305,16 +356,7 @@ def aggregate(live_ids, product_rows, deferred_items, skip_records, discovery, h
                 name_cache[name] = None
         return name_cache[name]
 
-    # article / parent_sku -> label, from crawled names
-    article_labels, parent_labels = {}, {}
-    for row in product_rows or []:
-        lbl = label(row.get("name"))
-        code = (row.get("ms_article_code") or "").strip()
-        psku = str(row.get("parent_sku") or "").strip()
-        if code and lbl and code not in article_labels:
-            article_labels[code] = lbl
-        if psku and lbl and psku not in parent_labels:
-            parent_labels[psku] = lbl
+    article_labels, parent_labels = crawled_label_maps(product_rows, label)
 
     # live offers
     live = set(live_ids or [])
@@ -486,11 +528,12 @@ def build(walk=False):
     quota = read_quota()
 
     discovery = walk_discovery(label_for_name) if walk else previous.get("discovery_found")
+    skip_offsets = _read_json(SKIP_OFFSETS_FILE, {}) or {}
 
     data = aggregate(
         live_ids=live, product_rows=rows,
         deferred_items=_read_json(DEFERRED_FILE, []),
-        skip_records=recent_skip_records(today=today),
+        skip_records=recent_skip_records(today=today, offsets=skip_offsets),
         discovery=discovery,
         hm_status=((_read_json(CATALOG_STATUS_FILE, {}) or {}).get("brands") or {}).get(HM),
         site_sections=load_site_sections(),
@@ -502,6 +545,7 @@ def build(walk=False):
     )
     data["mode"] = "walk" if walk else "default"
     data["sources"] = {"products_csv": csv_status}
+    data["upload_skips_since"] = skip_window_start(skip_offsets, today)[0]
 
     # products.csv locked/missing: carry over the last good crawl numbers.
     if rows is None:
@@ -522,11 +566,46 @@ def build(walk=False):
     return data
 
 
+def record_history(today=None):
+    """--record-history: local files only, no API. Appends the day's created
+    totals from new_items_submitted.json to daily_created_history.jsonl, and
+    stores today's upload_skipped.jsonl size in upload_skipped_offsets.json
+    (first call of a day only -- that's where the day's lines start)."""
+    today = today or daily_plan.utc_today()
+    rows, csv_status = read_products_csv()
+    article_labels, _ = crawled_label_maps(rows, _safe_label(daily_plan.category_label_for_name))
+    rec = created_history.record_snapshot(_read_json(NEW_ITEMS_LOG), article_labels)
+    print(f"Created history: {rec if rec else 'unchanged'} (products.csv {csv_status})")
+
+    offsets = _read_json(SKIP_OFFSETS_FILE, {}) or {}
+    size = file_size(SKIPPED_LOG)
+    if today not in offsets and size is not None:
+        offsets[today] = size
+        cutoff = (_date.fromisoformat(today) - timedelta(days=HISTORY_DAYS)).isoformat()
+        offsets = {d: v for d, v in sorted(offsets.items()) if d >= cutoff}
+        write_atomic(offsets, SKIP_OFFSETS_FILE)
+        print(f"Noted {SKIPPED_LOG} size {size} for {today}.")
+    return 0
+
+
+def _safe_label(label_for_name):
+    def label(name):
+        try:
+            return label_for_name(name) if name else None
+        except Exception:
+            return None
+    return label
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--walk", action="store_true",
                     help="SLOW: full read-only category walk (fetches every product page); queues nothing")
+    ap.add_argument("--record-history", action="store_true",
+                    help="local only: append created-offer history and note today's skip-log offset")
     args = ap.parse_args(argv)
+    if args.record_history:
+        return record_history()
 
     marker = Path(OUT_FILE + MARKER_SUFFIX)
     marker.write_text(datetime.now().isoformat(), encoding="utf-8")

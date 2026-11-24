@@ -229,6 +229,12 @@ def main():
         _finalize_failed_run(reason)
         return
 
+    # Created-offer history for the planner (category_inventory.py): local
+    # files only, no API. Before the upload, new_items_submitted.json still
+    # holds YESTERDAY's final list (10:15 quota-fill included). Non-fatal.
+    run_step("Created history (category_inventory.py --record-history)",
+             ["category_inventory.py", "--record-history"], timeout=300)
+
     counts = {"crawled": "?", "translated": 0, "translated_codes": [],
               "uploaded_ok": "?", "uploaded_failed": "?", "stock_ok": "?", "stock_failed": "?"}
     attention = []
@@ -397,6 +403,10 @@ def main():
         counts["auto_added_check_summary"] = done_line
         if "ALERT:" in auto_added_output:
             attention.append(f"Auto-added campaign products detected (not yet removed, see module docstring): {done_line}")
+
+    # Today's created-offer totals so far (local only, non-fatal).
+    run_step("Created history (category_inventory.py --record-history)",
+             ["category_inventory.py", "--record-history"], timeout=300)
 
     # 8. Update TASKS.md
     summary = (

@@ -118,16 +118,22 @@ def test_created_history_sources():
     assert by_date["2026-11-18"]["created_total"] is None
 
 
-def test_record_run_accumulates(tmp_path):
+def test_record_snapshot_dedupes_and_never_shrinks(tmp_path):
     path = tmp_path / "h.jsonl"
-    created_history.record_run([{"type_id": TYPE_ID_PAJAMA}] * 2, 2, today=TODAY, path=path)
-    created_history.record_run([{"type_id": TYPE_ID_SOCKS}, {"type_id": 5}], 4, today=TODAY, path=path)
+    labels = {"T07000001": "Pajama", "T41000002": "Socks"}
+    log = {"date": TODAY, "new_offer_ids": ["MS-T07000001-BLACK-M", "MS-T07000001-BLACK-L"]}
+    assert created_history.record_snapshot(log, labels, path=path)["created_total"] == 2
+    assert created_history.record_snapshot(log, labels, path=path) is None  # unchanged
+    log["new_offer_ids"] += ["MS-T41000002-NAVY-38", "MS-T99999999-RED-S"]
+    created_history.record_snapshot(log, labels, path=path)
     rec = created_history.load_history(path)[TODAY]
     assert rec["created_total"] == 4
     assert rec["by_category"] == {"Pajama": 2, "Socks": 1, "Unmapped": 1}
+    assert created_history.record_snapshot({"date": TODAY, "new_offer_ids": []}, labels, path=path) is None
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 2
 
 
-def test_recent_skip_records_stops_at_undated(tmp_path):
+def test_recent_skip_records_dated_lines(tmp_path):
     path = tmp_path / "s.jsonl"
     lines = [{"sku": 1, "name": "old, no date"},
              {"date": "2026-11-10", "sku": 2},
@@ -138,6 +144,42 @@ def test_recent_skip_records_stops_at_undated(tmp_path):
     assert [r["sku"] for r in recs] == [4, 3]
     # small block size exercises the partial-line stitching
     assert [r["sku"] for r in ci.iter_jsonl_reverse(path, block=7)] == [4, 3, 2, 1]
+
+
+def test_recent_skip_records_undated_uses_offsets(tmp_path):
+    path = tmp_path / "s.jsonl"
+    old = "".join(json.dumps({"sku": i}) + "\n" for i in range(3))
+    new = "".join(json.dumps({"sku": i}) + "\n" for i in range(10, 13))
+    path.write_bytes((old + new).encode("utf-8"))
+    off = len(old.encode("utf-8"))
+    for block in (5, 1 << 20):
+        pos = [p for p, _ in ci.iter_jsonl_reverse(path, block=block, with_pos=True)]
+        assert pos[-1] == 0 and pos[2] == off
+    offsets = {"2026-11-01": 0, "2026-11-20": off}  # 11-01 is outside the 7-day window
+    recs = ci.recent_skip_records(path, today=TODAY, offsets=offsets)
+    assert sorted(r["sku"] for r in recs) == [10, 11, 12]
+    # CRLF lines (upload_to_ozon appends in text mode on Windows)
+    path.write_bytes((old + new).replace("\n", "\r\n").encode("utf-8"))
+    crlf_off = len(old.replace("\n", "\r\n").encode("utf-8"))
+    recs = ci.recent_skip_records(path, today=TODAY, offsets={"2026-11-20": crlf_off})
+    assert sorted(r["sku"] for r in recs) == [10, 11, 12]
+    assert ci.skip_window_start(offsets, TODAY) == ("2026-11-20", off)
+    assert ci.recent_skip_records(path, today=TODAY, offsets={}) == []
+
+
+def test_record_history_writes_only_history(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "upload_skipped.jsonl").write_bytes(b'{"sku": 1}\r\n')  # text-mode append on Windows
+    (tmp_path / "new_items_submitted.json").write_text(
+        json.dumps({"date": TODAY, "new_offer_ids": ["MS-T07000001-BLACK-M"]}), encoding="utf-8")
+    assert ci.record_history(today=TODAY) == 0
+    assert ci.record_history(today=TODAY) == 0
+    offsets = json.loads((tmp_path / "upload_skipped_offsets.json").read_text(encoding="utf-8"))
+    assert offsets == {TODAY: 12}
+    assert created_history.load_history(tmp_path / "daily_created_history.jsonl")[TODAY]["created_total"] == 1
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "daily_created_history.jsonl", "new_items_submitted.json",
+        "upload_skipped.jsonl", "upload_skipped_offsets.json"]
 
 
 def test_main_writes_only_inventory(tmp_path, monkeypatch):
