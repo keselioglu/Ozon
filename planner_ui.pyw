@@ -434,6 +434,287 @@ def tail(text, n=3):
     return " | ".join(lines[-n:])
 
 
+# --- Daily tasks (pure) -----------------------------------------------------------
+# Turns a task_status.collect_status() dict into rows + STATUS colour keys.
+# No tkinter, no schtasks calls; every function takes any input without raising.
+
+TASK_STALE_HOURS = 26
+TASK_MISSED_GRACE = timedelta(minutes=10)
+TASK_TIME_FORMATS = (
+    "%m/%d/%Y %I:%M:%S %p",
+    "%m/%d/%Y %H:%M:%S",
+    "%d.%m.%Y %H:%M:%S",
+    "%d/%m/%Y %H:%M:%S",
+    "%Y-%m-%d %H:%M:%S",
+)
+CODE_RUNNING, CODE_DISABLED, CODE_NEVER_RUN = 0x41301, 0x41302, 0x41303
+RUNNING_WORDS = ("running", "çalışıyor")
+DISABLED_WORDS = ("disabled", "devre dışı", "devre dişi")
+NORMAL_TIMEOUT_STEPS = ("recheck_stockouts",)  # CLAUDE.md: under-provisioned, normal
+DASH = "—"
+
+
+def _as_dict(value):
+    return value if isinstance(value, dict) else {}
+
+
+def _text(value):
+    """str(value).strip() for real values, '' for None or anything str() chokes on."""
+    if value is None:
+        return ""
+    try:
+        return str(value).strip()
+    except Exception:
+        return ""
+
+
+def _fold(value):
+    return _text(value).casefold()
+
+
+def _code(task):
+    code = _as_dict(task).get("last_result_code")
+    return code if isinstance(code, int) and not isinstance(code, bool) else None
+
+
+def parse_task_time(s):
+    """Best-effort parse of a schtasks (possibly localized) time -> datetime or None."""
+    if not isinstance(s, str):
+        return None
+    s = " ".join(s.split())
+    if not s:
+        return None
+    for fmt in TASK_TIME_FORMATS:
+        try:
+            return datetime.strptime(s, fmt)
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+def task_is_stale(task, now=None):
+    """True when the trigger was missed (next_run > 10 min in the past) or, if
+    next_run is missing/unparseable, the last run is older than TASK_STALE_HOURS.
+    An unparseable last_run is never stale."""
+    try:
+        task = _as_dict(task)
+        now = now if isinstance(now, datetime) else datetime.now()
+        last = parse_task_time(task.get("last_run"))
+        if last is None:
+            return False
+        nxt = parse_task_time(task.get("next_run"))
+        if nxt is not None:
+            return nxt < now - TASK_MISSED_GRACE
+        return now - last > timedelta(hours=TASK_STALE_HOURS)
+    except Exception:
+        return False
+
+
+def _task_running(task):
+    status = _fold(task.get("status"))
+    return status in RUNNING_WORDS or _code(task) == CODE_RUNNING
+
+
+def _task_disabled(task):
+    if _code(task) == CODE_DISABLED:
+        return True
+    text = _fold(task.get("state")) + " " + _fold(task.get("status"))
+    return any(w in text for w in DISABLED_WORDS)
+
+
+def task_result_level(task, now=None):
+    """-> STATUS key: running / warning (never run, stale, disabled, unknown) / good / critical."""
+    try:
+        task = _as_dict(task)
+        if _task_running(task):
+            return "running"
+        if task.get("last_run") is None or _code(task) == CODE_NEVER_RUN:
+            return "warning"
+        if task_is_stale(task, now) or _task_disabled(task):
+            return "warning"
+        if task.get("ok") is True:
+            return "good"
+        if task.get("ok") is False:
+            return "critical"
+    except Exception:
+        pass
+    return "warning"
+
+
+def build_task_rows(status, now=None):
+    """One row per status['tasks'] entry, sorted by next_run (parsed) then name."""
+    try:
+        tasks = _as_dict(status).get("tasks")
+        tasks = tasks if isinstance(tasks, (list, tuple)) else []
+        rows = []
+        for t in tasks:
+            t = _as_dict(t)
+            level = task_result_level(t, now)
+            result = _text(t.get("last_result_text")) or "unknown"
+            if task_is_stale(t, now):
+                result += " (stale)"
+            rows.append({
+                "name": _text(t.get("name")) or "?",
+                "next_run": _text(t.get("next_run")) or DASH,
+                "last_run": _text(t.get("last_run")) or "never",
+                "result": result,
+                "status": _text(t.get("status")) or _text(t.get("state")),
+                "level": level,
+                "tag": level,
+                "_next": parse_task_time(t.get("next_run")),
+            })
+        rows.sort(key=lambda r: (0, r["_next"], r["name"]) if r["_next"] else (1, datetime.min, r["name"]))
+        for r in rows:
+            r.pop("_next", None)
+        return rows
+    except Exception:
+        return []
+
+
+def _step_is_normal_timeout(step):
+    text = _fold(step.get("script")) + " " + _fold(step.get("name"))
+    return any(k in text for k in NORMAL_TIMEOUT_STEPS)
+
+
+def step_level(step):
+    """daily_run step record -> STATUS key. Only the recheck_stockouts timeout is a warning."""
+    try:
+        step = _as_dict(step)
+        status = _fold(step.get("status"))
+        if status == "ok":
+            return "good"
+        if status in ("timeout", "timed out"):
+            return "warning" if _step_is_normal_timeout(step) else "critical"
+        if (status == "failed" or step.get("ok") is False
+                or any(w in status for w in ("fail", "error", "crash"))):
+            return "critical"
+    except Exception:
+        pass
+    return "warning"
+
+
+def fmt_seconds(value):
+    """12m 03s / 1h 02m 03s / '—'."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value or value < 0:
+        return DASH
+    try:
+        total = int(round(value))
+    except (OverflowError, ValueError):
+        return DASH
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}h {m:02d}m {s:02d}s" if h else f"{m}m {s:02d}s"
+
+
+def _step_result_text(step, level):
+    status = _fold(step.get("status"))
+    if status == "ok":
+        return "ok"
+    if status in ("timeout", "timed out"):
+        return "TIMED OUT (normal for this step)" if level == "warning" else "TIMED OUT"
+    if level == "critical":
+        return "FAILED"
+    return _text(step.get("status")) or "unknown"
+
+
+def build_step_rows(daily_run):
+    try:
+        steps = _as_dict(daily_run).get("steps")
+        steps = steps if isinstance(steps, (list, tuple)) else []
+        rows = []
+        for s in steps:
+            s = _as_dict(s)
+            level = step_level(s)
+            rows.append({
+                "name": _text(s.get("name")) or _text(s.get("script")) or "?",
+                "script": _text(s.get("script")),
+                "result": _step_result_text(s, level),
+                "seconds": fmt_seconds(s.get("seconds")),
+                "level": level,
+            })
+        return rows
+    except Exception:
+        return []
+
+
+RUN_STATE_LEVELS = {"completed": "good", "failed": "critical", "blocked": "critical", "running": "running"}
+
+
+def attention_items(daily_run):
+    try:
+        items = _as_dict(daily_run).get("attention")
+        if not isinstance(items, (list, tuple)):
+            return []
+        return [t for t in (_text(i) for i in items) if t]
+    except Exception:
+        return []
+
+
+def build_run_summary(daily_run):
+    """-> [(label, value, level)] for the latest-run panel."""
+    try:
+        dr = _as_dict(daily_run)
+        state = _text(dr.get("state")) or "unknown"
+        running = state == "running"
+        created, plan_total = dr.get("created_today"), dr.get("plan_total")
+        plan_level = "warning" if created is None or plan_total is None else "good"
+        plan_text = f"{_text(created) or '?'} / {_text(plan_total) or '?'}"
+        content = _text(dr.get("content_summary"))
+        upload = _text(dr.get("upload_totals"))
+        n_att = len(attention_items(dr))
+        return [
+            ("State", state, RUN_STATE_LEVELS.get(state, "warning")),
+            ("Date", _text(dr.get("date")) or DASH, "muted"),
+            ("Started", _text(dr.get("started_at")) or DASH, "muted"),
+            ("Finished", DASH if running else (_text(dr.get("finished_at")) or DASH), "muted"),
+            ("Plan created/total", plan_text, plan_level),
+            ("Content", content or "content status unknown", "good" if content else "warning"),
+            ("Upload totals", upload or "upload status unknown", "good" if upload else "warning"),
+            ("Attention", str(n_att), "warning" if n_att > 0 else "good"),
+        ]
+    except Exception:
+        return [("State", "unknown", "warning")]
+
+
+def stale_banner(status):
+    """Banner text when the latest daily_run_status.json isn't today's, else None."""
+    try:
+        st = _as_dict(status)
+        dr = _as_dict(st.get("daily_run"))
+        if dr.get("is_today") or not dr.get("stale"):
+            return None
+        today = _text(st.get("today")) or "?"
+        date = _text(dr.get("date"))
+        if date:
+            return f"Latest daily run is not from today (file date {date}, today {today})"
+        return f"Latest daily run is not from today (file has no date, today {today})"
+    except Exception:
+        return None
+
+
+def error_lines(status):
+    """Deduplicated str() of status['errors'] + tasks_error, in order."""
+    try:
+        st = _as_dict(status)
+        errors = st.get("errors")
+        errors = list(errors) if isinstance(errors, (list, tuple)) else ([errors] if errors else [])
+        out = []
+        for e in errors + [st.get("tasks_error")]:
+            t = _text(e)
+            if t and t not in out:
+                out.append(t)
+        return out
+    except Exception:
+        return []
+
+
+def level_color(level):
+    try:
+        return STATUS.get(level, MUTED)
+    except TypeError:  # unhashable garbage
+        return MUTED
+
+
 # --- Tabs (pure registration hook; no tkinter at module level) --------------------
 
 APP_TITLE = "Ozon Sales"
