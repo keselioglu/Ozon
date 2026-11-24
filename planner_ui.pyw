@@ -3,7 +3,13 @@ Ozon Sales -- tabbed desktop app (one ttk.Notebook window).
 
 Tabs, in order:
   * Overview -- placeholder ("Coming soon")
-  * Daily tasks -- placeholder ("Coming soon")
+  * Daily tasks -- view-only status (DailyTasksTab): scheduled MandsOzon* /
+    OzonSales_* tasks (next run, last run, coloured result), the latest
+    daily_run card with its per-step list, a stale banner when
+    daily_run_status.json isn't today's, and collect errors. Data comes from
+    task_status.collect_status() on a worker thread; Refresh (the only
+    button) or the 60s auto-refresh, never two collects at once. A
+    recheck_stockouts timeout is shown as a warning, not a failure.
   * Prioritization (opens first) -- the daily planner: splits the day's
     new-offer plan (daily_plan.json) by brand x category, with the numbers
     to decide on.
@@ -65,6 +71,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import daily_plan  # noqa: E402  (pure logic + local JSON; never calls Ozon)
+import task_status  # noqa: E402  (read-only: local JSON + a scheduler query, never changes a task)
 
 INVENTORY_FILE = "category_inventory.json"
 CATALOG_STATUS_FILE = "catalog_status.json"
@@ -708,6 +715,30 @@ def error_lines(status):
         return []
 
 
+def collected_text(status):
+    """'collected HH:MM:SS' from status['collected_at'] (ISO), or 'collected —'."""
+    try:
+        raw = _text(_as_dict(status).get("collected_at"))
+        return f"collected {datetime.fromisoformat(raw):%H:%M:%S}" if raw else f"collected {DASH}"
+    except Exception:
+        return f"collected {DASH}"
+
+
+def collect_daily_status():
+    """task_status.collect_status(), or a fallback dict with an errors entry if it
+    raises (or returns something that isn't a dict). Runs on a worker thread -- no Tk."""
+    try:
+        result = task_status.collect_status()
+        if isinstance(result, dict):
+            return result
+        error = f"collect_status returned {type(result).__name__}, not a dict"
+    except Exception as e:
+        error = f"collect_status failed: {type(e).__name__}: {e}"
+    now = datetime.now()
+    return {"collected_at": now.isoformat(timespec="seconds"), "today": now.strftime("%Y-%m-%d"),
+            "tasks": [], "daily_run": {"state": "unknown"}, "last_runs": [], "errors": [error]}
+
+
 def level_color(level):
     try:
         return STATUS.get(level, MUTED)
@@ -722,7 +753,9 @@ TAB_OVERVIEW = "Overview"
 TAB_DAILY = "Daily tasks"
 TAB_PRIORITIZATION = "Prioritization"
 TAB_NAMES = (TAB_OVERVIEW, TAB_DAILY, TAB_PRIORITIZATION)
-DEFAULT_TAB = TAB_PRIORITIZATION  # the other two are placeholders for now
+DEFAULT_TAB = TAB_PRIORITIZATION  # Overview is still a placeholder
+DAILY_REFRESH_MS = 60_000  # Daily tasks auto-refresh interval
+DAILY_FIRST_REFRESH_MS = 100
 
 TAB_BUILDERS = {}  # name -> builder(app, parent) -> object; insertion order = tab order
 
@@ -775,8 +808,155 @@ def build_overview_tab(app, parent):
     return _placeholder_tab(app, parent, TAB_OVERVIEW)
 
 
-def build_daily_tasks_tab(app, parent):
-    return _placeholder_tab(app, parent, TAB_DAILY)
+JOB_COLUMNS = (("name", "Task", 260), ("next_run", "Schedule / next run", 190),
+               ("last_run", "Last run", 190), ("result", "Result", 260), ("status", "Status", 110))
+STEP_COLUMNS = (("name", "Step", 420), ("result", "Result", 260), ("seconds", "Duration", 120))
+DAILY_FOOTNOTE = "View only — scheduled tasks are managed in Windows Task Scheduler."
+
+
+class DailyTasksTab(_WidgetHelpers):
+    """View-only status of the scheduled tasks and the latest daily_run.
+
+    task_status.collect_status() runs on a daemon thread and its result comes
+    back through app.post; collects never overlap (self.busy) and only one
+    auto-refresh timer is ever pending. Refresh is the tab's only button."""
+
+    def __init__(self, app, parent):
+        self.app = app
+        self.tk, self.ttk = app.tk, app.ttk
+        self.dpi = app.dpi
+        self.busy = False
+        self._after_id = None
+        self.status = None
+        tk = self.tk
+
+        outer = tk.Frame(parent, bg=BG)
+        outer.pack(fill="both", expand=True)
+        head = tk.Frame(outer, bg=BG)
+        head.pack(fill="x")
+        self.label(head, TAB_DAILY, 14, bold=True).pack(side="left")
+        self.refresh_btn = self.button(head, "Refresh", self.refresh)
+        self.refresh_btn.pack(side="right")
+        self.collected_label = self.label(head, f"collected {DASH}", 9, MUTED)
+        self.collected_label.pack(side="right", padx=(0, 10))
+
+        # packed (before the jobs table) only while stale_banner() has text
+        self.banner = tk.Label(outer, text="", bg=STATUS["warning"], fg=BG, font=(FONT, 9, "bold"),
+                               anchor="w", padx=8, pady=4)
+
+        self.jobs_wrap = tk.Frame(outer, bg=BG)
+        self.jobs_wrap.pack(fill="both", expand=True, pady=(10, 0))
+        self.jobs = self._tree(self.jobs_wrap, JOB_COLUMNS, 8)
+
+        card = tk.Frame(outer, bg=CARD, padx=10, pady=8)
+        card.pack(fill="x", pady=(10, 0))
+        self.label(card, "Latest daily run", 10, FG, True).pack(anchor="w")
+        self.summary = tk.Frame(card, bg=CARD)
+        self.summary.pack(fill="x", pady=(4, 0))
+        self.attention = self.label(card, "", 9, STATUS["warning"], wraplength=self.px(1000))
+        self.attention.pack(anchor="w", pady=(4, 0))
+
+        steps_wrap = tk.Frame(outer, bg=BG)
+        steps_wrap.pack(fill="both", expand=True, pady=(8, 0))
+        self.steps = self._tree(steps_wrap, STEP_COLUMNS, 8)
+
+        # packed (before the footnote) only while there are errors
+        self.errors = self.label(outer, "", 9, STATUS["critical"], wraplength=self.px(1000))
+        self.footnote = self.label(outer, DAILY_FOOTNOTE, 8, MUTED)
+        self.footnote.pack(anchor="w", pady=(6, 0))
+
+        self._schedule(DAILY_FIRST_REFRESH_MS)
+
+    def _tree(self, parent, columns, height):
+        tree = self.ttk.Treeview(parent, columns=[c[0] for c in columns], show="headings",
+                                 selectmode="browse", height=height)
+        for key, heading, width in columns:
+            tree.heading(key, text=heading)
+            tree.column(key, width=self.px(width), anchor="w", stretch=True)
+        for level, color in STATUS.items():
+            tree.tag_configure(level, foreground=color)
+        sb = self.ttk.Scrollbar(parent, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=sb.set)
+        tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        return tree
+
+    # ---------- refresh (worker thread -> app.post -> UI thread) ----------
+    def _cancel_timer(self):
+        if self._after_id is not None:
+            try:
+                self.app.root.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+
+    def _schedule(self, ms):
+        self._cancel_timer()
+        self._after_id = self.app.root.after(ms, self.refresh)
+
+    def refresh(self):
+        """Button + timer entry point. Does nothing while a collect is in flight."""
+        if self.busy:
+            return  # the in-flight collect's _apply reschedules the timer
+        self._cancel_timer()
+        self.busy = True
+        self.refresh_btn.configure(state="disabled")
+        self.collected_label.configure(text="collecting…")
+
+        def work():  # worker thread: no Tk calls here
+            self.app.post(self._apply, collect_daily_status())
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply(self, result):
+        try:
+            self.status = result
+            self.render(result)
+        except Exception as e:
+            print(f"Daily tasks render failed: {e}")
+        finally:
+            self.busy = False
+            self.refresh_btn.configure(state="normal")
+            self._schedule(DAILY_REFRESH_MS)
+
+    # ---------- drawing (UI thread only) ----------
+    def render(self, status):
+        self.collected_label.configure(text=collected_text(status))
+
+        banner = stale_banner(status)
+        if banner:
+            self.banner.configure(text=banner)
+            self.banner.pack(fill="x", pady=(8, 0), before=self.jobs_wrap)
+        else:
+            self.banner.pack_forget()
+
+        self.jobs.delete(*self.jobs.get_children())
+        for row in build_task_rows(status):
+            self.jobs.insert("", "end", values=[row[k] for k, _, _ in JOB_COLUMNS], tags=(row["level"],))
+
+        dr = _as_dict(_as_dict(status).get("daily_run"))
+        for w in self.summary.winfo_children():
+            w.destroy()
+        for i, (lbl, value, level) in enumerate(build_run_summary(dr)):
+            r, c = divmod(i, 4)
+            self.label(self.summary, lbl, 8, MUTED).grid(row=r * 2, column=c, sticky="w", padx=(0, 24))
+            self.label(self.summary, value, 10, level_color(level), True).grid(
+                row=r * 2 + 1, column=c, sticky="w", padx=(0, 24))
+        self.attention.configure(text="\n".join(f"• {t}" for t in attention_items(dr)))
+
+        self.steps.delete(*self.steps.get_children())
+        for row in build_step_rows(dr):
+            self.steps.insert("", "end", values=[row[k] for k, _, _ in STEP_COLUMNS], tags=(row["level"],))
+
+        lines = error_lines(status)
+        if lines:
+            self.errors.configure(text="\n".join(lines))
+            self.errors.pack(anchor="w", pady=(6, 0), before=self.footnote)
+        else:
+            self.errors.pack_forget()
+
+
+build_daily_tasks_tab = DailyTasksTab  # backward-compatible name
 
 
 class PrioritizationTab(_WidgetHelpers):
@@ -1236,7 +1416,7 @@ class PrioritizationTab(_WidgetHelpers):
 
 
 register_tab(TAB_OVERVIEW, build_overview_tab)
-register_tab(TAB_DAILY, build_daily_tasks_tab)
+register_tab(TAB_DAILY, DailyTasksTab)
 register_tab(TAB_PRIORITIZATION, PrioritizationTab)
 
 

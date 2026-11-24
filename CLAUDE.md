@@ -179,6 +179,10 @@ English column position. Also reads `daily_run_status.json` (local date,
 `stale` if not today) and the optional `hm_stock_last_run.json` /
 `catalog_status.json['runs']`. Run it off the Tk main thread, because schtasks
 can be slow.
+The app's Daily tasks tab (`planner_ui.DailyTasksTab`) is view-only: its
+only button is Refresh, it re-collects every 60s on a worker thread (never
+two collects at once), and it shows a `recheck_stockouts` timeout as a
+warning, not a failure (every other step timeout is critical).
 
 ## Category/type mapping (`ozon_mapping.py`)
 
