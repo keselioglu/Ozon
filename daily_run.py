@@ -2,8 +2,9 @@
 Unattended daily pipeline entry point, intended to be invoked by Windows Task
 Scheduler once a day. Runs, in order:
   1. Priority-ordered category discovery (category_priority.py) — walks
-     category_priority.csv from priority 1, queuing any not-yet-live products
-     from the first category that has some, into product_urls.txt.
+     category_priority.csv from priority 1, queuing not-yet-live products
+     into product_urls.txt until the day's plan (daily_plan.py, default 500
+     new offers, per-category allocations) is covered.
   2. Crawl (crawler.py) — processes whatever's newly queued in product_urls.txt.
   2b. Re-check pages behind previously zero-stock-skipped sizes
      (recheck_stockouts.py), so a restocked size gets uploaded instead of
@@ -176,6 +177,26 @@ def git_commit_and_push(message):
     return True
 
 
+def plan_progress_line():
+    """'plan N/500 created' from new_items_submitted.json + daily_plan.json
+    (both local files, no API call); a short 'unknown' note if unreadable."""
+    try:
+        import json
+        import daily_plan
+        plan_total = daily_plan.plan_for_date(daily_plan.load_plan(REPO_DIR / daily_plan.PLAN_FILE), None)["total"]
+        created = 0
+        try:
+            with open(REPO_DIR / daily_plan.NEW_ITEMS_LOG, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and data.get("date") == daily_plan.utc_today():
+                created = len(data.get("new_offer_ids") or [])
+        except (OSError, ValueError):
+            pass
+        return f"plan {created}/{plan_total} created"
+    except Exception as e:
+        return f"plan status unknown ({e})"
+
+
 def update_tasks_md(summary_line):
     tasks_path = REPO_DIR / "TASKS.md"
     content = tasks_path.read_text(encoding="utf-8")
@@ -212,9 +233,9 @@ def main():
               "uploaded_ok": "?", "uploaded_failed": "?", "stock_ok": "?", "stock_failed": "?"}
     attention = []
 
-    # 1. Priority-ordered category discovery — finds the first category (in
-    # priority order) with a product not yet live on Ozon, and queues it into
-    # product_urls.txt for the crawl step below to pick up. Not a hard failure
+    # 1. Priority-ordered category discovery — queues not-yet-live products,
+    # in priority order, into product_urls.txt until the day's plan is
+    # covered, for the crawl step below to pick up. Not a hard failure
     # if this step errors — crawler.py can still process anything already
     # queued from a previous run, so log and continue rather than stopping.
     ok, discovery_output = run_step("Category discovery (category_priority.py)", ["category_priority.py"], timeout=3600)
@@ -383,6 +404,7 @@ def main():
         f"translated {counts['translated']} "
         f"({', '.join(counts['translated_codes']) if counts['translated_codes'] else 'none'}), "
         f"{counts.get('upload_totals', 'upload status unknown')}, "
+        f"{plan_progress_line()}, "
         f"{counts.get('stock_summary', 'stock sync status unknown')}, "
         f"{counts.get('live_stock_summary', 'live stock refresh status unknown')}, "
         f"{counts.get('price_summary', 'price refresh status unknown')}, "

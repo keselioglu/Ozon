@@ -24,9 +24,19 @@ never in a database.
 1. **Category discovery** (`category_priority.py`) — walks
    `category_priority.csv` (priority-ordered) queuing not-yet-live product
    URLs into `product_urls.txt`, until either every category is checked or
-   the day's remaining `daily_create` quota is reached. Stops are **not**
-   "first category with anything new" — it walks the whole list so no quota
-   goes unused (business instruction, 2026-09-01).
+   the day's **plan** is covered: `daily_plan.remaining_today()` (plan total,
+   default 500 new offers, minus what's already in `new_items_submitted.json`
+   today, capped by the remaining `daily_create` quota). The target is
+   counted in estimated **offers** (in-stock size variants per product), not
+   URLs, and aims `DISCOVERY_OVERSHOOT_FACTOR` (1.2×) over, because the
+   upload's dedup checks drop some. Per-category allocations from
+   `daily_plan.json` are respected: a full (or unallocated) category only
+   gets more when `fill_remainder` is on and the total still has room.
+   Per-category "found, not live" counts are merged into
+   `category_inventory.json` under `discovery_found`. The upload is the hard
+   cap; overflow goes to `deferred_items.json`. Business instruction,
+   2026-11-24: aim for the daily plan, not the whole quota — this replaces
+   the 2026-09-01 "walk until the whole quota is filled" rule.
 2. **Crawl** (`crawler.py`) — fetches full detail for whatever's newly queued.
 3. **Stockout re-check** (`recheck_stockouts.py`) — re-fetches pages behind
    previously zero-stock-skipped sizes so a restock gets uploaded. Has a
@@ -62,8 +72,12 @@ Other scheduled tasks (Windows Task Scheduler): `MandsOzonQuotaTopup` (5am),
 faster stock push scoped to just today's new offer_ids, for products that
 clear moderation between the 4am run and later in the day),
 `MandsOzonDailyReport` (10am), `MandsOzonQuotaFill` (10:15am, runs
-`fill_remaining_quota.py` — if the 4am run didn't use the full daily quota,
-finds and uploads more).
+`fill_remaining_quota.py` — if the day's plan (default 500 new offers) isn't
+met yet and quota remains, finds and uploads more; if the plan is already
+met it logs "Daily plan (N) already met — nothing to fill" and stops before
+crawling). The 5am top-up and 10:15 fill both run `upload_to_ozon.py`, so
+they share the same daily plan cap as the 4am run. The daily TASKS.md /
+GitHub summary line includes `plan N/500 created`.
 
 ## Category/type mapping (`ozon_mapping.py`)
 
