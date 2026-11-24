@@ -58,6 +58,25 @@ def is_ms_family(offer_id):
     return offer_id.startswith(MS_FAMILY_PREFIXES)
 
 
+def _call_with_retry(path, params):
+    """ozon_client.call already retries each request 3x internally, but a run
+    of several consecutive ConnectionResetErrors on the same page can still
+    exhaust that -- confirmed live, 2026-10-28, across both this file's
+    paginated fetchers during the same stock-update run. Retries the whole
+    PAGE a further 3x on top, same pattern already proven in
+    set_margin_floor_prices.py / upload_to_ozon.find_existing_offer_ids."""
+    import time
+
+    for attempt in range(3):
+        try:
+            return call(path, params)
+        except RuntimeError as e:
+            if attempt == 2:
+                raise
+            print(f"  ! {path} page failed (attempt {attempt + 1}/3): {e} -- retrying in 10s...")
+            time.sleep(10)
+
+
 def fetch_weights(offer_ids):
     """offer_id -> weight in grams, via /v4/product/info/attributes, batched
     at 1000 (API max)."""
@@ -70,7 +89,7 @@ def fetch_weights(offer_ids):
             params = {"filter": {"offer_id": batch}, "limit": 1000}
             if cursor:
                 params["last_id"] = cursor
-            result = call("/v4/product/info/attributes", params)
+            result = _call_with_retry("/v4/product/info/attributes", params)
             for item in result.get("result", []):
                 weights[item["offer_id"]] = item.get("weight")
             cursor = result.get("last_id")
@@ -92,7 +111,7 @@ def fetch_final_prices(offer_ids):
             params = {"filter": {"offer_id": batch}, "limit": 1000}
             if cursor:
                 params["cursor"] = cursor
-            result = call("/v5/product/info/prices", params)
+            result = _call_with_retry("/v5/product/info/prices", params)
             for item in result.get("items", []):
                 price_info = item.get("price", {})
                 try:

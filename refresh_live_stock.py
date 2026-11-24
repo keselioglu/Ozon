@@ -44,8 +44,10 @@ warehouse_routing.py — see that module for the weight/price eligibility rule
 just once at upload, since a special-offer price change can move a product
 in or out of eligibility.
 """
+import json
 import sys
 import time
+from datetime import datetime
 
 import pandas as pd
 
@@ -67,6 +69,58 @@ REFETCH_LOG = "stock_refresh_skipped.jsonl"
 WRONG_URL_LOG = "stock_refresh_wrong_url.jsonl"
 UNMATCHED_SUMMARY_FILE = "unmatched_offer_ids.txt"
 WRONG_URL_SUMMARY_FILE = "wrong_url_offer_ids.txt"
+# One JSON line per run: pages/products checked and how stock moved vs. what
+# Ozon held just before the push. Read by C:\Git\_dashboard. Reporting only —
+# any failure building it is logged and never blocks the actual stock push.
+STOCK_SUMMARY_HISTORY = "stock_update_history.jsonl"
+
+
+def snapshot_ozon_stock(offer_ids):
+    """offer_id -> total stock Ozon holds right now (all warehouses), or None
+    if it couldn't be read. Uses margin_pricing.get_real_stock — the repo's one
+    reliable stock source (/v4/product/info/stocks)."""
+    try:
+        from margin_pricing import get_real_stock
+        return get_real_stock(list(offer_ids))
+    except Exception as e:
+        print(f"(summary) couldn't read current Ozon stock for comparison: {e}")
+        return None
+
+
+def write_stock_summary(stats, before, after, skipped):
+    """Compares Ozon's pre-push stock (before) with the values pushed (after)
+    and appends one line to STOCK_SUMMARY_HISTORY."""
+    try:
+        cmp = {"increased": 0, "decreased": 0, "unchanged": 0,
+               "zero_to_stock": 0, "stock_to_zero": 0, "no_prior_value": 0,
+               "units_before": 0, "units_after": 0}
+        if before is not None:
+            for oid, new in after.items():
+                if oid in skipped:
+                    continue
+                if oid not in before:
+                    cmp["no_prior_value"] += 1
+                    continue
+                old = before[oid]
+                cmp["units_before"] += old
+                cmp["units_after"] += new
+                if new > old:
+                    cmp["increased"] += 1
+                elif new < old:
+                    cmp["decreased"] += 1
+                else:
+                    cmp["unchanged"] += 1
+                if old == 0 and new > 0:
+                    cmp["zero_to_stock"] += 1
+                elif old > 0 and new == 0:
+                    cmp["stock_to_zero"] += 1
+        stats["comparison"] = cmp if before is not None else None
+        stats["finished_at"] = datetime.now().isoformat(timespec="seconds")
+        with open(STOCK_SUMMARY_HISTORY, "a", encoding="utf-8") as f:
+            f.write(json.dumps(stats, ensure_ascii=False) + "\n")
+        print(f"(summary) written to {STOCK_SUMMARY_HISTORY}: {json.dumps(stats.get('comparison'))}")
+    except Exception as e:
+        print(f"(summary) couldn't write stock summary: {e}")
 
 
 def load_legacy_url_map(path=LEGACY_URL_MAP_FILE):
@@ -74,9 +128,17 @@ def load_legacy_url_map(path=LEGACY_URL_MAP_FILE):
     file doesn't exist yet (it's optional)."""
     try:
         df = pd.read_csv(path, encoding="utf-8-sig")
+        url_map = dict(zip(df["ID"], df["URL"]))
     except FileNotFoundError:
-        return {}
-    return dict(zip(df["ID"], df["URL"]))
+        url_map = {}
+    # Overlay pages find_missing_costs.py found via M&S search and verified as the
+    # same product (2026-11-23) — they replace dead / wrong legacy URLs.
+    try:
+        found = pd.read_csv("found_product_urls.csv", encoding="utf-8-sig")
+        url_map.update(zip(found["ID"], found["URL"]))
+    except FileNotFoundError:
+        pass
+    return url_map
 
 
 def fetch_live_offer_ids_matching(candidate_offer_ids):
@@ -278,6 +340,12 @@ def _key(entry):
     return (entry["offer_id"], entry["warehouse_id"])
 
 
+# offer_ids with at least one failed warehouse row in this run — routing sends
+# 2 rows per product (target warehouse + zeroed other one), so row counts are
+# ~2x product counts; this lets the summary report PRODUCTS, not rows.
+FAILED_OFFER_IDS = set()
+
+
 def push_stock_updates(updates):
     total_ok, total_failed = 0, 0
     retry_queue = []
@@ -293,6 +361,7 @@ def push_stock_updates(updates):
                 retry_queue.append(next(u for u in batch if _key(u) == key))
             else:
                 total_failed += 1
+                FAILED_OFFER_IDS.add(r.get("offer_id"))
                 errors = "; ".join(e.get("message", str(e)) for e in r.get("errors", []))
                 print(f"  FAIL {r.get('offer_id')} @ {r.get('warehouse_id')}: {errors}")
 
@@ -311,6 +380,7 @@ def push_stock_updates(updates):
                     total_ok += 1
                 else:
                     total_failed += 1
+                    FAILED_OFFER_IDS.add(r.get("offer_id"))
                     errors = "; ".join(e.get("message", str(e)) for e in r.get("errors", []))
                     print(f"  FAIL (after retry) {r.get('offer_id')} @ {r.get('warehouse_id')}: {errors}")
 
@@ -357,9 +427,12 @@ def main():
     all_unmatched = []
     all_wrong_url = []
     fetch_failures = 0
+    pages_failed = 0  # pages that errored or returned no data (their offer_ids were zeroed)
     for i, (url, offer_ids) in enumerate(offer_ids_by_url.items(), 1):
         print(f"[{i}/{len(offer_ids_by_url)}] {url} ({len(offer_ids)} offer_id(s))")
         updates, unmatched, wrong_url, warning = build_stock_updates_for_url(url, offer_ids)
+        if warning and (warning.startswith("fetch error") or warning == "no product data found on page"):
+            pages_failed += 1
         if warning:
             print(f"  ! {warning}")
             import json
@@ -413,8 +486,28 @@ def main():
               f"stock not pushed for these; existing warehouse assignment left as-is.")
     print(f"{len(routed_updates)} warehouse-routed stock update(s) to push.\n")
 
+    skipped_ids = {s if isinstance(s, str) else (s.get("offer_id") if isinstance(s, dict) else str(s))
+                   for s in (routing_skipped or [])}
+    print("(summary) reading Ozon's current stock for before/after comparison...")
+    before = snapshot_ozon_stock(offer_id_to_stock.keys())
+
     total_ok, total_failed = push_stock_updates(routed_updates)
     print(f"\nDone. {total_ok} updated, {total_failed} failed, {unknown_count} skipped (no known URL).")
+
+    write_stock_summary({
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "pages_checked": len(offer_ids_by_url),
+        "pages_failed": pages_failed,
+        "products_checked": len(known_offer_ids),
+        "products_untouched_no_url": unknown_count,
+        "sizes_gone_set_to_zero": len(set(all_unmatched)),
+        "wrong_url_set_to_zero": len(set(all_wrong_url)),
+        "routing_skipped": len(skipped_ids),
+        "push_rows_ok": total_ok,
+        "push_rows_failed": total_failed,
+        "products_pushed_ok": len({u["offer_id"] for u in routed_updates} - FAILED_OFFER_IDS),
+        "products_push_failed": len(FAILED_OFFER_IDS),
+    }, before, offer_id_to_stock, skipped_ids)
 
 
 if __name__ == "__main__":
