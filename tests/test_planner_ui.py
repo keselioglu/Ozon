@@ -243,3 +243,61 @@ def test_shortcut_ps_command_quotes_paths():
     assert "$s.Arguments = '\"C:\\repo\\planner_ui.pyw\"'" in cmd
     assert "$s.WorkingDirectory = 'C:\\repo'" in cmd
     assert inst.shortcut_path().name == "Ozon Daily Planner.lnk"
+
+
+# --- tabbed shell -------------------------------------------------------------
+
+def test_app_title_and_tabs():
+    assert ui.APP_TITLE == "Ozon Sales"
+    assert ui.TAB_NAMES == ("Overview", "Daily tasks", "Prioritization")
+    assert ui.tab_names() == list(ui.TAB_NAMES)
+    assert ui.DEFAULT_TAB == "Prioritization"
+    assert ui.PlannerApp is ui.OzonSalesApp
+
+
+def test_source_assigns_title_and_defines_prioritization_tab():
+    with open(APP_PATH, encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+    titles = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)
+              and any(isinstance(t, ast.Name) and t.id == "APP_TITLE" for t in n.targets)]
+    assert titles and isinstance(titles[0].value, ast.Constant) and titles[0].value.value == "Ozon Sales"
+    assert any(isinstance(n, ast.ClassDef) and n.name == "PrioritizationTab" for n in ast.walk(tree))
+
+
+def test_register_tab_appends_replaces_in_place_and_decorates(monkeypatch):
+    monkeypatch.setattr(ui, "TAB_BUILDERS", dict(ui.TAB_BUILDERS))
+
+    def dummy(app, parent):
+        return "dummy"
+
+    assert ui.register_tab("Extra", dummy) is dummy
+    assert ui.tab_names() == list(ui.TAB_NAMES) + ["Extra"]
+
+    def other(app, parent):
+        return "other"
+
+    ui.register_tab("Overview", other)
+    assert ui.tab_names() == list(ui.TAB_NAMES) + ["Extra"]
+    assert ui.TAB_BUILDERS["Overview"] is other
+
+    @ui.register_tab("Decorated")
+    def decorated(app, parent):
+        return "decorated"
+
+    assert ui.TAB_BUILDERS["Decorated"] is decorated
+    assert decorated(None, None) == "decorated"
+    assert ui.tab_names()[-1] == "Decorated"
+
+
+def test_register_tab_changes_are_restored():
+    assert ui.tab_names() == list(ui.TAB_NAMES)
+    assert ui.TAB_BUILDERS["Prioritization"] is ui.PrioritizationTab
+
+
+def test_read_only_endpoints_and_commands_unchanged():
+    assert ui.READ_ONLY_ENDPOINTS == frozenset({"/v4/product/info/limit"})
+    assert set(ui.COMMANDS) == {"catalog_status", "inventory", "walk", "preview"}
+    assert ui.COMMANDS["catalog_status"] == ["catalog_status.py"]
+    assert ui.COMMANDS["inventory"] == ["category_inventory.py"]
+    assert ui.COMMANDS["walk"] == ["category_inventory.py", "--walk"]
+    assert ui.COMMANDS["preview"] == ["upload_to_ozon.py", "--dry-run"]

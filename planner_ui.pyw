@@ -1,7 +1,21 @@
 """
-Ozon Daily Planner -- desktop app for splitting the day's new-offer plan
-(daily_plan.json) by brand x category, with the numbers to decide on.
+Ozon Sales -- tabbed desktop app (one ttk.Notebook window).
 
+Tabs, in order:
+  * Overview -- placeholder ("Coming soon")
+  * Daily tasks -- placeholder ("Coming soon")
+  * Prioritization (opens first) -- the daily planner: splits the day's
+    new-offer plan (daily_plan.json) by brand x category, with the numbers
+    to decide on.
+
+Later tasks add or replace tabs through the module-level hook
+register_tab(name, builder), usable as a plain call or as a decorator;
+builder(app, parent) gets the OzonSalesApp shell (root, tk, ttk, post, px,
+label, button) and a tk.Frame already added to the notebook. Tabs must hand
+worker-thread results back through app.post (the shell's single queue) and
+never touch Tk from a thread or start their own poll loop.
+
+Prioritization tab:
   * header: Ozon daily_create quota (live read of /v4/product/info/limit,
     'unknown' if it fails), today's plan created/planned
     (new_items_submitted.json), deferred queue size, and per-brand catalog
@@ -15,14 +29,13 @@ Ozon Daily Planner -- desktop app for splitting the day's new-offer plan
   * actions: Refresh numbers, Full site walk (slow), Preview today's split
     (upload_to_ozon.py --dry-run)
 
-READ-ONLY toward Ozon: the only Ozon call is the quota read, and the only
+The app is still READ-ONLY toward Ozon: the only Ozon call is the quota read, and the only
 scripts it starts are the read-only snapshots plus the upload's --dry-run.
 Uploads happen in the scheduled runs, never from here. Every Ozon call and
 subprocess runs off the UI thread; results come back through a queue
 that the UI thread drains on a root.after poll.
 
-Started from the "Ozon Daily Planner" Desktop shortcut
-(install_desktop_shortcut.py). Tkinter + standard library only.
+Started from the Desktop shortcut made by install_desktop_shortcut.py. Tkinter + standard library only.
 """
 import copy
 import json
@@ -421,99 +434,41 @@ def tail(text, n=3):
     return " | ".join(lines[-n:])
 
 
+# --- Tabs (pure registration hook; no tkinter at module level) --------------------
+
+APP_TITLE = "Ozon Sales"
+TAB_OVERVIEW = "Overview"
+TAB_DAILY = "Daily tasks"
+TAB_PRIORITIZATION = "Prioritization"
+TAB_NAMES = (TAB_OVERVIEW, TAB_DAILY, TAB_PRIORITIZATION)
+DEFAULT_TAB = TAB_PRIORITIZATION  # the other two are placeholders for now
+
+TAB_BUILDERS = {}  # name -> builder(app, parent) -> object; insertion order = tab order
+
+
+def register_tab(name, builder=None):
+    """Registers builder(app, parent) -> object as the tab `name`. Works as a
+    plain call or as a decorator (@register_tab("X")). Re-registering a name
+    replaces its builder but keeps its position. Returns the builder."""
+    if builder is None:
+        def deco(fn):
+            return register_tab(name, fn)
+        return deco
+    TAB_BUILDERS[name] = builder
+    return builder
+
+
+def tab_names():
+    return list(TAB_BUILDERS)
+
+
 # --- UI --------------------------------------------------------------------------
 
-class PlannerApp:
-    def __init__(self):
-        import tkinter as tk
-        from tkinter import ttk
-        self.tk, self.ttk = tk, ttk
-        self.today = daily_plan.utc_today()
-        self.plan = daily_plan.load_plan(str(HERE / PLAN_FILE))
-        self.day_key = DEFAULT_KEY
-        self.day = get_day(self.plan, self.day_key)
-        self.dirty = False
-        self.quota = None
-        self.quota_state = "checking"
-        self.created_by_cat = None
-        self.busy = set()
-        self.rows = []
-        self.editor = None
-        self._results = queue.Queue()  # worker threads -> UI thread
+class _WidgetHelpers:
+    """Shared widget helpers; needs self.tk and self.dpi."""
 
-        self.root = tk.Tk()
-        self.root.title("Ozon Daily Planner")
-        self.root.configure(bg=BG)
-        self.dpi = max(1.0, self.root.winfo_fpixels("1i") / 96.0)  # DPI-aware: scale pixel sizes
-        self.root.geometry(f"{self.px(1180)}x{self.px(780)}")
-        self.root.minsize(self.px(980), self.px(640))
-        self._style()
-
-        self.total_var = tk.StringVar(value=str(self.day["total"]))
-        self.fill_var = tk.BooleanVar(value=self.day["fill_remainder"])
-        self.day_var = tk.StringVar()
-        self.status_var = tk.StringVar(value="Loaded cached numbers.")
-        self.walk_var = tk.StringVar(value="")
-
-        outer = tk.Frame(self.root, bg=BG, padx=16, pady=12)
-        outer.pack(fill="both", expand=True)
-        head = tk.Frame(outer, bg=BG)
-        head.pack(fill="x")
-        self.label(head, "Ozon Daily Planner", 14, bold=True).pack(side="left")
-        self.built_label = self.label(head, "", 9, MUTED)
-        self.built_label.pack(side="right")
-        self.cards = tk.Frame(outer, bg=BG)
-        self.cards.pack(fill="x", pady=(10, 0))
-
-        self._build_table(outer)
-        self._build_editor(outer)
-        self._build_actions(outer)
-
-        self.load_local()
-        self.root.after(POLL_MS, self._drain_results)
-        self.root.after(50, self.start_background_reads)
-
-    # ---------- thread hand-off ----------
-    def post(self, fn, *args):
-        """Called from worker threads: queue fn(*args) for the UI thread
-        (tkinter itself must only be touched from the UI thread)."""
-        self._results.put((fn, args))
-
-    def _drain_results(self):
-        try:
-            while True:
-                fn, args = self._results.get_nowait()
-                try:
-                    fn(*args)
-                except Exception as e:
-                    print(f"UI update failed: {e}")
-        except queue.Empty:
-            pass
-        self.root.after(POLL_MS, self._drain_results)
-
-    # ---------- helpers ----------
     def px(self, n):
         return int(round(n * self.dpi))
-
-    def _style(self):
-        s = self.ttk.Style(self.root)
-        try:
-            s.theme_use("clam")
-        except Exception:
-            pass
-        s.configure("Treeview", background=CARD, fieldbackground=CARD, foreground=FG,
-                    bordercolor=LINE, rowheight=self.px(24), font=(FONT, 9))
-        s.configure("Treeview.Heading", background=LINE, foreground=FG, font=(FONT, 9, "bold"),
-                    bordercolor=LINE, relief="flat")
-        s.map("Treeview", background=[("selected", "#3a4a66")], foreground=[("selected", FG)])
-        s.map("Treeview.Heading", background=[("active", "#4a4a46")])
-        s.configure("TCombobox", fieldbackground=CARD, background=LINE, foreground=FG, arrowcolor=FG)
-        s.map("TCombobox", fieldbackground=[("readonly", CARD)], foreground=[("readonly", FG)],
-              selectbackground=[("readonly", CARD)], selectforeground=[("readonly", FG)],
-              background=[("readonly", LINE)])
-        self.root.option_add("*TCombobox*Listbox.background", CARD)
-        self.root.option_add("*TCombobox*Listbox.foreground", FG)
-        s.configure("Vertical.TScrollbar", background=LINE, troughcolor=BG, arrowcolor=FG, bordercolor=BG)
 
     def label(self, parent, text, size=10, color=FG, bold=False, anchor="w", **kw):
         return self.tk.Label(parent, text=text, bg=parent["bg"], fg=color,
@@ -526,6 +481,72 @@ class PlannerApp:
                               font=(FONT, 9, "bold" if accent else "normal"), padx=10, pady=4,
                               bd=0, cursor="hand2", disabledforeground=DIM)
 
+
+def _placeholder_tab(app, parent, name):
+    f = app.tk.Frame(parent, bg=BG)
+    f.pack(fill="both", expand=True)
+    app.label(f, name, 14, bold=True).pack(anchor="w")
+    app.label(f, "Coming soon", 10, MUTED).pack(anchor="w", pady=(6, 0))
+    return f
+
+
+def build_overview_tab(app, parent):
+    return _placeholder_tab(app, parent, TAB_OVERVIEW)
+
+
+def build_daily_tasks_tab(app, parent):
+    return _placeholder_tab(app, parent, TAB_DAILY)
+
+
+class PrioritizationTab(_WidgetHelpers):
+    """The planner: quota cards, brand x category table, plan editor, actions."""
+
+    def __init__(self, app, parent):
+        self.app = app
+        self.tk, self.ttk = app.tk, app.ttk
+        self.dpi = app.dpi
+        tk = self.tk
+        self.today = daily_plan.utc_today()
+        self.plan = daily_plan.load_plan(str(HERE / PLAN_FILE))
+        self.day_key = DEFAULT_KEY
+        self.day = get_day(self.plan, self.day_key)
+        self.dirty = False
+        self.quota = None
+        self.quota_state = "checking"
+        self.created_by_cat = None
+        self.busy = set()
+        self.rows = []
+        self.editor = None
+
+        self.total_var = tk.StringVar(value=str(self.day["total"]))
+        self.fill_var = tk.BooleanVar(value=self.day["fill_remainder"])
+        self.day_var = tk.StringVar()
+        self.status_var = tk.StringVar(value="Loaded cached numbers.")
+        self.walk_var = tk.StringVar(value="")
+
+        outer = tk.Frame(parent, bg=BG)
+        outer.pack(fill="both", expand=True)
+        head = tk.Frame(outer, bg=BG)
+        head.pack(fill="x")
+        self.label(head, "Prioritization", 14, bold=True).pack(side="left")
+        self.built_label = self.label(head, "", 9, MUTED)
+        self.built_label.pack(side="right")
+        self.cards = tk.Frame(outer, bg=BG)
+        self.cards.pack(fill="x", pady=(10, 0))
+
+        self._build_table(outer)
+        self._build_editor(outer)
+        self._build_actions(outer)
+
+        self.load_local()
+        self.app.root.after(50, self.start_background_reads)
+
+    # ---------- thread hand-off ----------
+    def post(self, fn, *args):
+        """Called from worker threads: hands fn(*args) to the shell's queue."""
+        self.app.post(fn, *args)
+
+    # ---------- helpers ----------
     def card(self, col, title, value, sub, sub_color=MUTED):
         f = self.tk.Frame(self.cards, bg=CARD, padx=10, pady=8)
         f.grid(row=0, column=col, sticky="nsew", padx=(0 if col == 0 else 6, 0))
@@ -720,7 +741,8 @@ class PlannerApp:
             return
         if self.dirty:
             from tkinter import messagebox
-            if not messagebox.askyesno("Unsaved changes", "Discard unsaved changes to this day?"):
+            if not messagebox.askyesno("Unsaved changes", "Discard unsaved changes to this day?",
+                                       parent=self.app.root):
                 self.day_var.set(day_label(self.day_key, self.today))
                 return
         self.day_key = key
@@ -892,7 +914,8 @@ class PlannerApp:
         if not messagebox.askokcancel(
                 "Full site walk",
                 "This fetches every product page in every supported M&S category and can take "
-                "hours. It only counts -- nothing is queued or uploaded. Start it?"):
+                "hours. It only counts -- nothing is queued or uploaded. Start it?",
+                parent=self.app.root):
             return
         self.walk_var.set(f"Full site walk running since {datetime.now():%H:%M} "
                           "(category_inventory.py --walk)…")
@@ -916,7 +939,7 @@ class PlannerApp:
 
     def show_text(self, title, text):
         tk = self.tk
-        win = tk.Toplevel(self.root)
+        win = tk.Toplevel(self.app.root)
         win.title(title)
         win.configure(bg=BG)
         win.geometry("1000x600")
@@ -930,8 +953,102 @@ class PlannerApp:
         txt.see("end")
         txt.configure(state="disabled")
 
+
+register_tab(TAB_OVERVIEW, build_overview_tab)
+register_tab(TAB_DAILY, build_daily_tasks_tab)
+register_tab(TAB_PRIORITIZATION, PrioritizationTab)
+
+
+class OzonSalesApp(_WidgetHelpers):
+    """The window: one ttk.Notebook with a tab per TAB_BUILDERS entry. Owns
+    the single worker-thread -> UI-thread queue; tabs hand results back via
+    app.post and never touch Tk from a thread."""
+
+    def __init__(self):
+        import tkinter as tk
+        from tkinter import ttk
+        self.tk, self.ttk = tk, ttk
+        self._results = queue.Queue()  # worker threads -> UI thread
+        self.tabs = {}
+
+        self.root = tk.Tk()
+        self.root.title(APP_TITLE)
+        self.root.configure(bg=BG)
+        self.dpi = max(1.0, self.root.winfo_fpixels("1i") / 96.0)  # DPI-aware: scale pixel sizes
+        self.root.geometry(f"{self.px(1180)}x{self.px(780)}")
+        self.root.minsize(self.px(980), self.px(640))
+        self._style()
+
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill="both", expand=True)
+        frames = {}
+        for name, builder in TAB_BUILDERS.items():
+            frame = tk.Frame(self.notebook, bg=BG, padx=16, pady=12)
+            self.notebook.add(frame, text=name)
+            frames[name] = frame
+            try:
+                self.tabs[name] = builder(self, frame)
+            except Exception as e:
+                import traceback
+                print(f"Tab {name!r} failed to build: {e}\n{traceback.format_exc()}")
+                for w in frame.winfo_children():
+                    w.destroy()
+                self.label(frame, f"{name} could not be loaded: {e}", 10, STATUS["critical"],
+                           wraplength=self.px(900)).pack(anchor="w")
+                self.tabs[name] = None
+        if DEFAULT_TAB in frames:
+            self.notebook.select(frames[DEFAULT_TAB])
+
+        self.root.after(POLL_MS, self._drain_results)
+
+    # ---------- thread hand-off ----------
+    def post(self, fn, *args):
+        """Called from worker threads: queue fn(*args) for the UI thread
+        (tkinter itself must only be touched from the UI thread)."""
+        self._results.put((fn, args))
+
+    def _drain_results(self):
+        try:
+            while True:
+                fn, args = self._results.get_nowait()
+                try:
+                    fn(*args)
+                except Exception as e:
+                    print(f"UI update failed: {e}")
+        except queue.Empty:
+            pass
+        self.root.after(POLL_MS, self._drain_results)
+
+    def _style(self):
+        s = self.ttk.Style(self.root)
+        try:
+            s.theme_use("clam")
+        except Exception:
+            pass
+        s.configure("Treeview", background=CARD, fieldbackground=CARD, foreground=FG,
+                    bordercolor=LINE, rowheight=self.px(24), font=(FONT, 9))
+        s.configure("Treeview.Heading", background=LINE, foreground=FG, font=(FONT, 9, "bold"),
+                    bordercolor=LINE, relief="flat")
+        s.map("Treeview", background=[("selected", "#3a4a66")], foreground=[("selected", FG)])
+        s.map("Treeview.Heading", background=[("active", "#4a4a46")])
+        s.configure("TCombobox", fieldbackground=CARD, background=LINE, foreground=FG, arrowcolor=FG)
+        s.map("TCombobox", fieldbackground=[("readonly", CARD)], foreground=[("readonly", FG)],
+              selectbackground=[("readonly", CARD)], selectforeground=[("readonly", FG)],
+              background=[("readonly", LINE)])
+        self.root.option_add("*TCombobox*Listbox.background", CARD)
+        self.root.option_add("*TCombobox*Listbox.foreground", FG)
+        s.configure("Vertical.TScrollbar", background=LINE, troughcolor=BG, arrowcolor=FG, bordercolor=BG)
+        s.configure("TNotebook", background=BG, bordercolor=LINE, tabmargins=(0, 4, 0, 0))
+        s.configure("TNotebook.Tab", background=LINE, foreground=FG, bordercolor=LINE,
+                    lightcolor=LINE, padding=(self.px(14), self.px(5)), font=(FONT, 9))
+        s.map("TNotebook.Tab", background=[("selected", CARD), ("active", "#4a4a46")],
+              foreground=[("selected", FG)], lightcolor=[("selected", CARD)])
+
     def run(self):
         self.root.mainloop()
+
+
+PlannerApp = OzonSalesApp  # backward-compatible alias
 
 
 def main():
@@ -941,7 +1058,7 @@ def main():
     except Exception:
         pass
     os.chdir(HERE)
-    PlannerApp().run()
+    OzonSalesApp().run()
 
 
 if __name__ == "__main__":
