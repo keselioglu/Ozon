@@ -9,8 +9,9 @@ their own a few minutes later) — those get one longer-delay retry alongside th
 existing TOO_MANY_REQUESTS retry, rather than being reported as a hard failure.
 
 Stock is routed to the correct warehouse (regular vs. small-items) via
-warehouse_routing.py — see that module for the weight/price eligibility rule
-(business instruction, 2026-08-27). Routing is re-evaluated every run, not
+warehouse_routing.py — price-only rule: final sale price below $60 goes to
+the small-items warehouse, $60+ to the regular one (business instruction,
+2026-11-24, task #47; see that module). Routing is re-evaluated every run, not
 just once at upload, since a special-offer price change can move a product
 in or out of eligibility.
 """
@@ -94,11 +95,11 @@ def push_stock_updates_for(existing_updates):
     if not existing_updates:
         return print("Nothing to update.")
 
-    print("Deciding target warehouse per product (weight/price routing)...")
+    print("Deciding target warehouse per product (price routing, $60 threshold)...")
     offer_id_to_stock = {u["offer_id"]: u["stock"] for u in existing_updates}
     updates, routing_skipped = build_routed_stock_updates(offer_id_to_stock)
     if routing_skipped:
-        print(f"{len(routing_skipped)} offer_id(s) skipped for routing (missing weight/price) — "
+        print(f"{len(routing_skipped)} offer_id(s) skipped for routing (missing price) — "
               f"stock not pushed for these; existing warehouse assignment left as-is.")
     print(f"{len(updates)} warehouse-routed stock update(s) to push.\n")
 

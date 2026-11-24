@@ -208,9 +208,13 @@ re-confirming which behavior is wanted.
 
 ## Warehouse routing (`warehouse_routing.py`)
 
-Products under 500g AND under $80 route to the small-items warehouse
-(`SMALL_WAREHOUSE_ID`); everything else to the regular warehouse
-(`REGULAR_WAREHOUSE_ID`). Re-evaluated every stock-sync run, not just once at
+Price-only rule (business instruction, 2026-11-24, task #47 — replaces the
+old "under 500g AND under $80" rule): an item whose final sale price that day
+(Ozon `price.price`, USD) is below $60 routes to the small-items warehouse
+(`SMALL_WAREHOUSE_ID`) with 0 in the regular one; $60.00 or more routes to the
+regular warehouse (`REGULAR_WAREHOUSE_ID`) with 0 in the small one. Weight is
+not consulted; it applies to all brands (M&S and H&M alike). No valid price →
+skipped, left where it is. Re-evaluated every stock-sync run, not just once at
 upload (a price change can move eligibility). `warehouse_assignments.json` is
 self-tracked state (Ozon doesn't reliably report back which warehouse holds
 stock) — **`save_warehouse_assignments()` must merge into the existing file,

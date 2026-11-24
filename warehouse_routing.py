@@ -8,17 +8,22 @@ Confirmed live via /v2/warehouse/list (2026-08-27):
   SMALL_WAREHOUSE_ID   = 1020002288795000  "Small Items Warehouse_below_500gr"
   (name itself confirms the 500g threshold)
 
-Eligibility rule (business-confirmed): weight < 500g AND current final price
-(Ozon's price.price field -- what the buyer actually pays right now,
-including any active special-offer/markdown; NOT old_price, which is only
-the crossed-out "was" price) < $80 USD. Both conditions must hold; a special
-offer that drops the final price under $80 makes an item newly eligible even
-if it wasn't before, and price expiring back above $80 makes it ineligible
-again -- this needs re-checking on every daily run, not just once at upload.
+Eligibility rule (business instruction, 2026-11-24, task #47 -- replaces
+the 2026-08-27 "under 500g AND under $80" rule): PRICE ONLY. If an item's
+final sale price that day (Ozon's price.price field -- what the buyer
+actually pays right now, including any active special-offer/markdown; NOT
+old_price, which is only the crossed-out "was" price) is below $60 USD, its
+stock goes to the small-items warehouse and 0 to the regular one; at $60.00
+or more it goes to the regular warehouse and 0 to the small one. Weight is
+no longer part of the test (despite the small warehouse's "<500gr" name).
+A special offer that drops the price under $60 moves an item to small, and
+the price going back to $60+ moves it back -- re-checked on every daily
+stock-sync run, not just once at upload. An item with no valid price is
+skipped (left where it is) rather than guessed.
 
-Scope: M&S-family products only (MS-, MAR-, SML-, MARKS-, MARK-, SMLMS-) --
-other brands on this account (H&M, etc.) are out of scope for now, per
-business decision, since this pipeline doesn't track their weight/price data.
+Scope: every offer_id passed to build_routed_stock_updates(), all brands
+(M&S and H&M alike) -- the earlier "M&S only" scope existed only because
+weight data wasn't tracked for other brands, and weight is no longer used.
 
 This module only decides the target warehouse and builds the two-sided
 stock write (real count at the target, 0 at the other) -- it doesn't fetch
@@ -48,8 +53,7 @@ REGULAR_WAREHOUSE_ID = 1020000320456000   # "Ozpark Bee Concept"
 SMALL_WAREHOUSE_ID = 1020002288795000     # "Small Items Warehouse_below_500gr"
 WAREHOUSE_STATE_FILE = "warehouse_assignments.json"
 
-WEIGHT_THRESHOLD_G = 500
-PRICE_THRESHOLD_USD = 80.0
+PRICE_THRESHOLD_USD = 60.0
 
 MS_FAMILY_PREFIXES = ("MS-", "MAR-", "SML-", "MARKS-", "MARK-", "SMLMS-")
 
@@ -79,7 +83,8 @@ def _call_with_retry(path, params):
 
 def fetch_weights(offer_ids):
     """offer_id -> weight in grams, via /v4/product/info/attributes, batched
-    at 1000 (API max)."""
+    at 1000 (API max). No longer used for routing (task #47: price-only
+    rule); kept as a standalone helper."""
     offer_ids = list(offer_ids)
     weights = {}
     for i in range(0, len(offer_ids), 1000):
@@ -124,13 +129,20 @@ def fetch_final_prices(offer_ids):
     return prices
 
 
-def decide_target_warehouse(weight_g, final_price_usd):
-    """Returns REGULAR_WAREHOUSE_ID or SMALL_WAREHOUSE_ID, or None if either
-    input is missing (caller should skip rather than guess a warehouse for
-    a product we can't actually evaluate)."""
-    if weight_g is None or final_price_usd is None:
+def decide_target_warehouse(final_price_usd):
+    """Returns SMALL_WAREHOUSE_ID when the final price is below $60,
+    REGULAR_WAREHOUSE_ID when it is $60 or more, or None when the price is
+    missing / zero / negative / not a number (caller should skip rather than
+    guess a warehouse for a product we can't actually evaluate)."""
+    if final_price_usd is None:
         return None
-    if weight_g < WEIGHT_THRESHOLD_G and final_price_usd < PRICE_THRESHOLD_USD:
+    try:
+        price = float(final_price_usd)
+    except (TypeError, ValueError):
+        return None
+    if price != price or price <= 0:  # NaN or non-positive
+        return None
+    if price < PRICE_THRESHOLD_USD:
         return SMALL_WAREHOUSE_ID
     return REGULAR_WAREHOUSE_ID
 
@@ -138,35 +150,28 @@ def decide_target_warehouse(weight_g, final_price_usd):
 def build_routed_stock_updates(offer_id_to_stock):
     """Given {offer_id: real_stock_count}, returns a list of Ozon
     /v2/products/stocks payload entries that put the real count at the
-    correct warehouse and 0 at the other warehouse for every M&S-family
-    offer_id, so a daily re-route (e.g. a price drop into a special offer)
-    actually moves stock rather than just adding it in a second place.
-    Non-M&S-family offer_ids are passed through unchanged, targeting the
-    regular warehouse only (out of scope for routing, per business decision).
+    correct warehouse (by the $60 price-only rule) and 0 at the other
+    warehouse for every offer_id, any brand, so a daily re-route (e.g. a
+    price drop into a special offer) actually moves stock rather than just
+    adding it in a second place.
     Returns (updates, skipped) where skipped lists offer_ids we couldn't
-    evaluate (missing weight or price) — those keep whatever warehouse
+    evaluate (missing/invalid price) — those keep whatever warehouse
     assignment they already have; nothing is written for them here."""
-    ms_offer_ids = [oid for oid in offer_id_to_stock if is_ms_family(oid)]
-    other_offer_ids = [oid for oid in offer_id_to_stock if not is_ms_family(oid)]
-
-    weights = fetch_weights(ms_offer_ids)
-    prices = fetch_final_prices(ms_offer_ids)
+    offer_ids = list(offer_id_to_stock)
+    prices = fetch_final_prices(offer_ids) if offer_ids else {}
 
     updates = []
     skipped = []
 
-    for oid in ms_offer_ids:
+    for oid in offer_ids:
         stock = offer_id_to_stock[oid]
-        target = decide_target_warehouse(weights.get(oid), prices.get(oid))
+        target = decide_target_warehouse(prices.get(oid))
         if target is None:
             skipped.append(oid)
             continue
         other = SMALL_WAREHOUSE_ID if target == REGULAR_WAREHOUSE_ID else REGULAR_WAREHOUSE_ID
         updates.append({"offer_id": oid, "stock": stock, "warehouse_id": target})
         updates.append({"offer_id": oid, "stock": 0, "warehouse_id": other})
-
-    for oid in other_offer_ids:
-        updates.append({"offer_id": oid, "stock": offer_id_to_stock[oid], "warehouse_id": REGULAR_WAREHOUSE_ID})
 
     save_warehouse_assignments(updates)
     return updates, skipped
