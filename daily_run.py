@@ -52,10 +52,13 @@ All output is appended to daily_run_<date>.log (gitignored, like the other
 *_log.txt state files) so a run can be inspected after the fact even though
 Task Scheduler runs it headless.
 """
+import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -66,6 +69,12 @@ if sys.platform == "win32":
 REPO_DIR = Path(__file__).resolve().parent
 TODAY = datetime.now().strftime("%Y-%m-%d")
 LOG_FILE = REPO_DIR / f"daily_run_{TODAY}.log"
+# Machine-readable run status for the 10am report (gitignored, overwritten
+# atomically by write_run_status()).
+STATUS_FILE = REPO_DIR / "daily_run_status.json"
+# One {name, script, status, seconds} dict per run_step() call this run.
+STEP_RESULTS = []
+RUN_STARTED_AT = None
 
 REPORT_REPO = "keselioglu/Ozon"
 REPORT_ISSUE = 13
@@ -127,6 +136,13 @@ def run_step(name, args, timeout=1800):
     """Runs one pipeline step as a subprocess, streaming+logging its output.
     Returns (success, combined_output)."""
     log(f"--- {name} ---")
+    started = time.monotonic()
+
+    def record(status):
+        STEP_RESULTS.append({"name": name, "script": args[0] if args else None,
+                             "status": status,
+                             "seconds": round(time.monotonic() - started, 1)})
+
     try:
         result = subprocess.run(
             [sys.executable] + args,
@@ -139,6 +155,7 @@ def run_step(name, args, timeout=1800):
         )
     except subprocess.TimeoutExpired as e:
         log(f"{name} TIMED OUT after {timeout}s")
+        record("timeout")
         return False, str(e)
 
     output = (result.stdout or "") + (result.stderr or "")
@@ -148,9 +165,11 @@ def run_step(name, args, timeout=1800):
 
     if result.returncode != 0:
         log(f"{name} FAILED (exit code {result.returncode})")
+        record("failed")
         return False, output
 
     log(f"{name} completed.")
+    record("ok")
     return True, output
 
 
@@ -183,21 +202,28 @@ def git_commit_and_push(message):
     return True
 
 
-def plan_progress_line():
-    """'plan N/500 created' from new_items_submitted.json + daily_plan.json
-    (both local files, no API call); a short 'unknown' note if unreadable."""
+def plan_progress():
+    """(created, plan_total) from new_items_submitted.json + daily_plan.json
+    (both local files, no API call). created is 0 if the log is missing or
+    from another day. Raises if the plan itself can't be resolved."""
+    import daily_plan
+    plan_total = daily_plan.plan_for_date(daily_plan.load_plan(REPO_DIR / daily_plan.PLAN_FILE), None)["total"]
+    created = 0
     try:
-        import json
-        import daily_plan
-        plan_total = daily_plan.plan_for_date(daily_plan.load_plan(REPO_DIR / daily_plan.PLAN_FILE), None)["total"]
-        created = 0
-        try:
-            with open(REPO_DIR / daily_plan.NEW_ITEMS_LOG, encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict) and data.get("date") == daily_plan.utc_today():
-                created = len(data.get("new_offer_ids") or [])
-        except (OSError, ValueError):
-            pass
+        with open(REPO_DIR / daily_plan.NEW_ITEMS_LOG, encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and data.get("date") == daily_plan.utc_today():
+            created = len(data.get("new_offer_ids") or [])
+    except (OSError, ValueError):
+        pass
+    return created, plan_total
+
+
+def plan_progress_line():
+    """'plan N/500 created' (see plan_progress()); a short 'unknown' note if
+    unreadable."""
+    try:
+        created, plan_total = plan_progress()
         return f"plan {created}/{plan_total} created"
     except Exception as e:
         return f"plan status unknown ({e})"
@@ -224,6 +250,41 @@ def content_summary(rating_done, improve_done):
             f"{groups + ' groups improved' if groups is not None else 'improvement status unknown'}")
 
 
+def write_run_status(state, summary=None, attention=None, counts=None):
+    """Writes STATUS_FILE atomically (tmp file + os.replace) for the 10am
+    report. state: 'running' | 'completed' | 'failed' | 'blocked'. Never
+    raises: a status-write failure is logged and the run carries on."""
+    try:
+        counts = counts or {}
+        try:
+            created, plan_total = plan_progress()
+        except Exception:
+            created, plan_total = None, None
+        status = {
+            "date": TODAY,
+            "state": state,
+            "started_at": RUN_STARTED_AT,
+            "finished_at": None if state == "running" else datetime.now().isoformat(timespec="seconds"),
+            "steps": list(STEP_RESULTS),
+            "summary": summary,
+            "attention": list(attention or []),
+            "created_today": created,
+            "plan_total": plan_total,
+            "content_summary": counts.get("content_summary"),
+            "upload_totals": counts.get("upload_totals"),
+        }
+        path = Path(STATUS_FILE)
+        tmp = path.with_name(path.name + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(status, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except Exception as e:
+        try:
+            log(f"WARNING: could not write {STATUS_FILE}: {e}")
+        except Exception:
+            pass
+
+
 def update_tasks_md(summary_line):
     tasks_path = REPO_DIR / "TASKS.md"
     content = tasks_path.read_text(encoding="utf-8")
@@ -244,7 +305,11 @@ def update_tasks_md(summary_line):
 
 
 def main():
+    global RUN_STARTED_AT
+    RUN_STARTED_AT = datetime.now().isoformat(timespec="seconds")
+    STEP_RESULTS.clear()
     log(f"===== Daily run starting: {TODAY} =====")
+    write_run_status("running")
 
     locked = check_for_file_locks()
     if locked:
@@ -253,7 +318,7 @@ def main():
             "Excel or another program on this machine. Close it and re-run."
         )
         log(f"BLOCKED: {reason}")
-        _finalize_failed_run(reason)
+        _finalize_failed_run(reason, state="blocked")
         return
 
     # Created-offer history for the planner (category_inventory.py): local
@@ -481,9 +546,11 @@ def main():
     if attention:
         report += "\n\n**Needs attention:**\n" + "\n".join(f"- {a}" for a in attention)
     post_github_report(report)
+    write_run_status("completed", summary, attention, counts)
 
 
-def _finalize_failed_run(reason, tasks_note=False, translated=0, translated_codes=None):
+def _finalize_failed_run(reason, tasks_note=False, translated=0, translated_codes=None,
+                         state="failed"):
     """Records a failed run in TASKS.md and commits whatever partial progress exists,
     so tomorrow's run (and the human) has visibility into what happened."""
     summary = f"{TODAY}: FAILED — {reason}"
@@ -496,6 +563,7 @@ def _finalize_failed_run(reason, tasks_note=False, translated=0, translated_code
         log(f"Could not even log the failure to TASKS.md: {e}")
     log(summary)
     post_github_report(f"### Daily run: {TODAY}\n\n**FAILED**\n\n{summary}")
+    write_run_status(state, summary, [reason])
 
 
 if __name__ == "__main__":

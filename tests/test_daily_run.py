@@ -76,3 +76,105 @@ def test_content_step_failures_do_not_stop_run(monkeypatch):
     assert len(reports) == 1
     assert "Content improvement step failed" in reports[0]
     assert "Content rating step failed" in reports[0]
+
+
+# --- daily_run_status.json (task #50) ---
+
+import json
+import subprocess
+
+
+def test_run_step_records_ok_failed_timeout(monkeypatch, tmp_path):
+    monkeypatch.setattr(daily_run, "log", lambda msg: None)
+    monkeypatch.setattr(daily_run, "LOG_FILE", tmp_path / "run.log")
+    monkeypatch.setattr(daily_run, "STEP_RESULTS", [])
+    outcomes = iter([0, 1, "timeout"])
+
+    def fake_run(cmd, **kw):
+        rc = next(outcomes)
+        if rc == "timeout":
+            raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+        return subprocess.CompletedProcess(cmd, rc, stdout="out", stderr="")
+
+    monkeypatch.setattr(daily_run.subprocess, "run", fake_run)
+    assert daily_run.run_step("A", ["a.py"])[0] is True
+    assert daily_run.run_step("B", ["b.py", "--x"])[0] is False
+    ok, out = daily_run.run_step("C", ["c.py"], timeout=5)
+    assert ok is False and isinstance(out, str)
+    steps = daily_run.STEP_RESULTS
+    assert [(s["name"], s["script"], s["status"]) for s in steps] == [
+        ("A", "a.py", "ok"), ("B", "b.py", "failed"), ("C", "c.py", "timeout")]
+    assert all(isinstance(s["seconds"], float) for s in steps)
+
+
+def _read_status(path):
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_main_writes_completed_status(monkeypatch, tmp_path):
+    status_file = tmp_path / "daily_run_status.json"
+    monkeypatch.setattr(daily_run, "STATUS_FILE", status_file)
+    monkeypatch.setattr(daily_run, "plan_progress", lambda: (12, 500))
+    _, summaries, _, _ = _patch_run(monkeypatch, failing=())
+    daily_run.main()
+    st = _read_status(status_file)
+    assert st["date"] == daily_run.TODAY
+    assert st["state"] == "completed"
+    assert st["summary"] == summaries[0]
+    assert isinstance(st["attention"], list)
+    assert not any("step failed" in a for a in st["attention"])
+    assert isinstance(st["steps"], list)
+    assert st["created_today"] == 12 and st["plan_total"] == 500
+    assert st["started_at"] and st["finished_at"]
+    assert st["upload_totals"].startswith("Totals:")
+    assert st["content_summary"] == "content status unknown"
+    assert not (tmp_path / "daily_run_status.json.tmp").exists()
+
+
+def test_main_content_failures_completed_with_attention(monkeypatch, tmp_path):
+    status_file = tmp_path / "daily_run_status.json"
+    monkeypatch.setattr(daily_run, "STATUS_FILE", status_file)
+    _patch_run(monkeypatch, failing=("content_rating.py", "improve_content.py"))
+    daily_run.main()
+    st = _read_status(status_file)
+    assert st["state"] == "completed"
+    assert any("Content rating step failed" in a for a in st["attention"])
+    assert any("Content improvement step failed" in a for a in st["attention"])
+
+
+def test_main_crawl_failure_writes_failed(monkeypatch, tmp_path):
+    status_file = tmp_path / "daily_run_status.json"
+    monkeypatch.setattr(daily_run, "STATUS_FILE", status_file)
+    _patch_run(monkeypatch, failing=("crawler.py",))
+    daily_run.main()
+    st = _read_status(status_file)
+    assert st["state"] == "failed"
+    assert "FAILED" in st["summary"]
+
+
+def test_finalize_failed_run_states(monkeypatch, tmp_path):
+    status_file = tmp_path / "daily_run_status.json"
+    monkeypatch.setattr(daily_run, "STATUS_FILE", status_file)
+    _patch_run(monkeypatch, failing=())
+    daily_run._finalize_failed_run("Crawl step failed")
+    st = _read_status(status_file)
+    assert st["state"] == "failed" and st["attention"] == ["Crawl step failed"]
+    daily_run._finalize_failed_run("products.csv locked", state="blocked")
+    assert _read_status(status_file)["state"] == "blocked"
+
+
+def test_main_blocked_by_file_lock(monkeypatch, tmp_path):
+    status_file = tmp_path / "daily_run_status.json"
+    monkeypatch.setattr(daily_run, "STATUS_FILE", status_file)
+    _patch_run(monkeypatch, failing=())
+    monkeypatch.setattr(daily_run, "check_for_file_locks", lambda: ["products.csv"])
+    daily_run.main()
+    assert _read_status(status_file)["state"] == "blocked"
+
+
+def test_status_write_failure_never_raises(monkeypatch, tmp_path):
+    logged = []
+    monkeypatch.setattr(daily_run, "log", logged.append)
+    monkeypatch.setattr(daily_run, "STATUS_FILE", tmp_path / "missing_dir" / "s.json")
+    daily_run.write_run_status("running")
+    assert any("could not write" in m for m in logged)

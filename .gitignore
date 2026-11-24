@@ -38,6 +38,8 @@ daily_plan.json
 category_inventory.json
 category_inventory.refreshing
 .category_inventory_*.tmp
+daily_run_status.json
+daily_run_status.json.tmp
 upload_skipped_offsets.json
 content_rating_snapshot.json
 content_attr_schema_cache.json
