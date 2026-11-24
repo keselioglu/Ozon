@@ -36,3 +36,5 @@ _temp_*
 sample_page*.html
 daily_plan.json
 category_inventory.json
+category_inventory.refreshing
+.category_inventory_*.tmp

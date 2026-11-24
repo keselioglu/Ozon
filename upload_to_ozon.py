@@ -27,6 +27,7 @@ from ozon_mapping import (
     map_sock_size_to_ozon, resolve_category_and_type, resolve_gender,
 )
 from ozon_translations import BRAND_PREFIX, COLLECTION_ID, WARRANTY_ID, get_translation
+import created_history
 
 ATTR_MATERIAL = 4496
 ATTR_PLANTING_TYPE = 4619
@@ -383,6 +384,7 @@ def main():
             )
             with open(SKIPPED_LOG, "a", encoding="utf-8") as f:
                 f.write(json.dumps({
+                    "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                     "sku": row.get("variant_sku"), "name": row.get("name"),
                     "reasons": [reason],
                 }, ensure_ascii=False) + "\n")
@@ -405,6 +407,7 @@ def main():
             )
             with open(SKIPPED_LOG, "a", encoding="utf-8") as f:
                 f.write(json.dumps({
+                    "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                     "sku": row.get("variant_sku"), "name": row.get("name"),
                     "reasons": [reason],
                 }, ensure_ascii=False) + "\n")
@@ -416,6 +419,7 @@ def main():
             skipped += 1
             with open(SKIPPED_LOG, "a", encoding="utf-8") as f:
                 f.write(json.dumps({
+                    "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                     "sku": row.get("variant_sku"), "name": row.get("name"),
                     "reasons": warnings,
                 }, ensure_ascii=False) + "\n")
@@ -493,6 +497,9 @@ def main():
             }, f, ensure_ascii=False, indent=2)
         print(f"Logged {len(new_items)} new-product offer_id(s) from this run "
               f"({len(combined_ids)} total logged for today) to {NEW_ITEMS_LOG}.\n")
+        # Per-day created history (daily_created_history.jsonl) for the
+        # planner's 14-day view -- category_inventory.py reads it.
+        created_history.record_run(new_items, len(combined_ids), today=today)
 
     if not to_upload:
         print("Nothing within quota to upload right now.")
