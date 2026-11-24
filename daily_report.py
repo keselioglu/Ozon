@@ -78,6 +78,16 @@ refresh_live_stock.py covers).
 Scheduled via Windows Task Scheduler at 10:00am (separate from the
 4am/5am/6am daily_run.py schedule) -- NOT wired into daily_run.py itself,
 since this reads/summarizes state rather than acting on it.
+
+Telegram summary (task #51): after the GitHub post, main() also sends a short
+plain-text message (build_telegram_text(), ~10 lines) via
+telegram_notify.send_telegram(): whether the 4am daily_run.py finished (read
+from daily_run_status.json, see load_run_status()), which steps failed or
+timed out, new offers vs. the daily plan, the content summary, and a few
+snapshot numbers. If the metric gathering crashes, a minimal "Daily report
+failed: <ExceptionType>" message (plus the run status lines) is still sent
+and the exception is re-raised. Without TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID
+in .env, send_telegram() just logs "Telegram not sent: not configured".
 """
 import json
 import sys
@@ -89,7 +99,9 @@ if sys.platform == "win32":
 
 import shutil
 import subprocess
+from pathlib import Path
 
+import telegram_notify
 from check_auto_added_campaign_products import list_enrolled_products
 from enroll_campaigns import list_active_campaigns
 from margin_pricing import compute_ratio_pct, fetch_usd_try_rate, load_ms_prices, qualifies
@@ -101,6 +113,9 @@ from warehouse_routing import REGULAR_WAREHOUSE_ID, SMALL_WAREHOUSE_ID, load_war
 HISTORY_FILE = "daily_report_history.jsonl"
 NEW_ITEMS_LOG = "new_items_submitted.json"
 CATALOG_MARGIN_FILE = "catalog_margin_risk_today.json"
+# Written by daily_run.py (write_run_status()), dated with daily_run's LOCAL date.
+RUN_STATUS_FILE = Path(__file__).resolve().parent / "daily_run_status.json"
+TELEGRAM_MAX_PROBLEMS = 5
 
 REPORT_REPO = "keselioglu/Ozon"
 REPORT_ISSUE = 13
@@ -418,7 +433,136 @@ def post_github_report(body):
         print(f"Could not post GitHub report: {e}")
 
 
+def load_run_status(today_str=None):
+    """daily_run_status.json as a dict, or None if missing/corrupt. A status
+    from another day is still returned: build_telegram_text() compares its
+    date with today_str and reports it as 'no run today'. Never raises."""
+    try:
+        with open(RUN_STATUS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _hhmm(iso):
+    """'05:42' from an ISO timestamp, '?' if unparseable."""
+    try:
+        return datetime.fromisoformat(str(iso)).strftime("%H:%M")
+    except Exception:
+        return "?"
+
+
+def _short(value, limit=150):
+    s = " ".join(str(value).split())
+    return s if len(s) <= limit else s[: limit - 3] + "..."
+
+
+def _status_is_today(run_status, today_str):
+    return isinstance(run_status, dict) and run_status.get("date") == today_str
+
+
+def _run_status_lines(run_status, today_str):
+    """The 'Daily run: ...' line, plus a 'Problems: ...' line when steps
+    failed or timed out. today_str is daily_run.py's LOCAL date."""
+    if not _status_is_today(run_status, today_str):
+        last = run_status.get("date") if isinstance(run_status, dict) else None
+        return [f"Daily run: ❓ no run today (last status: {last or 'none'})"]
+
+    steps = run_status.get("steps")
+    problems = [st for st in (steps if isinstance(steps, list) else [])
+                if isinstance(st, dict) and st.get("status") in ("failed", "timeout")]
+    state = run_status.get("state")
+    if state == "running":
+        line = f"Daily run: ⏳ still running or crashed (started {_hhmm(run_status.get('started_at'))})"
+    elif state in ("failed", "blocked"):
+        attention = run_status.get("attention")
+        reason = ((attention[0] if isinstance(attention, list) and attention else None)
+                  or run_status.get("summary") or "?")
+        line = f"Daily run: ❌ FAILED: {_short(reason)}"
+    elif state == "completed":
+        if problems:
+            n = len(problems)
+            line = f"Daily run: ⚠️ completed with {n} problem{'s' if n != 1 else ''}"
+        else:
+            line = f"Daily run: ✅ completed {_hhmm(run_status.get('finished_at'))}"
+    else:
+        line = f"Daily run: ❓ unknown state ({_short(state, 40)})"
+
+    lines = [line]
+    if problems:
+        names = [f"{_short(st.get('name') or '?', 40)} ({st.get('status')})"
+                 for st in problems[:TELEGRAM_MAX_PROBLEMS]]
+        extra = len(problems) - TELEGRAM_MAX_PROBLEMS
+        if extra > 0:
+            names.append(f"+{extra} more")
+        lines.append("Problems: " + ", ".join(names))
+    return lines
+
+
+def _plan_total(run_status, today_str):
+    """Today's plan total from the run status, else from daily_plan.json; None if neither."""
+    if _status_is_today(run_status, today_str) and run_status.get("plan_total") is not None:
+        return run_status["plan_total"]
+    try:
+        import daily_plan
+        return daily_plan.plan_for_date(daily_plan.load_plan(), None)["total"]
+    except Exception:
+        return None
+
+
+def build_telegram_text(snapshot, run_status, today_str):
+    """Short plain-text Telegram summary (about 10 lines, < 1000 chars).
+    today_str is the LOCAL date (daily_run.py's TODAY). Missing values show
+    '?'. Never raises."""
+    try:
+        snap = snapshot if isinstance(snapshot, dict) else {}
+        lines = [f"Ozon daily report {today_str}"]
+        lines += _run_status_lines(run_status, today_str)
+        lines.append(f"New offers: {fmt(snap.get('products_added'))}/"
+                     f"{fmt(_plan_total(run_status, today_str))} plan "
+                     f"(quota left {fmt(snap.get('quota_left'))})")
+        content = run_status.get("content_summary") if _status_is_today(run_status, today_str) else None
+        content = _short(content, 200) if content else "content status unknown"
+        lines.append(content[:1].upper() + content[1:])
+        lines.append(f"Stock: {snap.get('stock_freshness_str') or '?'}")
+        lines.append(f"Campaigns: {snap.get('campaign_str') or '?'}")
+        revenue = snap.get("revenue_usd")
+        if isinstance(revenue, (int, float)):
+            revenue = round(revenue, 2)
+        lines.append(f"Sales 24h: {fmt(snap.get('units_sold'))} units, {fmt(revenue)} USD")
+        return "\n".join(lines)[:1000]
+    except Exception as e:
+        return f"Ozon daily report {today_str}\nTelegram summary could not be built ({type(e).__name__})"
+
+
+def build_telegram_failure_text(exc, run_status, today_str):
+    """Minimal message for when the metric gathering crashed. Never raises."""
+    head = [f"Ozon daily report {today_str}", f"Daily report failed: {type(exc).__name__}"]
+    try:
+        return "\n".join(head + _run_status_lines(run_status, today_str))[:1000]
+    except Exception:
+        return "\n".join(head)
+
+
 def main():
+    # daily_run.py dates its status with the LOCAL date, so compare against that.
+    local_today = datetime.now().strftime("%Y-%m-%d")
+    run_status = load_run_status(local_today)
+    try:
+        report_md, snapshot = gather_report()
+    except Exception as e:
+        telegram_notify.send_telegram(build_telegram_failure_text(e, run_status, local_today))
+        raise
+
+    post_github_report(report_md)
+    telegram_notify.send_telegram(build_telegram_text(snapshot, run_status, local_today))
+    print("Done.")
+
+
+def gather_report():
+    """Collects every metric, saves today's snapshot and returns
+    (report_md, snapshot)."""
     now = datetime.now(timezone.utc)
     today_str = now.strftime("%Y-%m-%d")
 
@@ -474,9 +618,7 @@ def main():
 
     report_md = build_markdown(snapshot, yesterday)
     print("\n" + report_md + "\n")
-
-    post_github_report(report_md)
-    print("Done.")
+    return report_md, snapshot
 
 
 if __name__ == "__main__":

@@ -85,6 +85,11 @@ met it logs "Daily plan (N) already met — nothing to fill" and stops before
 crawling). The 5am top-up and 10:15 fill both run `upload_to_ozon.py`, so
 they share the same daily plan cap as the 4am run. The daily TASKS.md /
 GitHub summary line includes `plan N/500 created`.
+`MandsOzonDailyReport` (`daily_report.py`) also sends a short Telegram
+summary (4am run state from `daily_run_status.json`, failed steps, new offers
+vs. plan, content, stock/campaigns/sales); it needs `TELEGRAM_BOT_TOKEN` /
+`TELEGRAM_CHAT_ID` in `.env`, otherwise it logs "Telegram not sent: not
+configured".
 
 **Planner app** (`planner_ui.pyw`, Desktop shortcut "Ozon Daily Planner" via
 `install_desktop_shortcut.py`): tkinter view of quota / plan / pool per
@@ -332,6 +337,8 @@ key for `auto_translate.py` (loaded via `anthropic.Anthropic()`'s default env
 var). `gh` CLI must be reachable (installed at
 `C:\Program Files\GitHub CLI\gh.exe`, not necessarily on PATH) with the
 `Tugberk-AI` account authenticated for daily report posting.
+Optional `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env` for the 10am
+Telegram summary (`telegram_notify.py`; the token is never printed).
 
 ## Working conventions
 
