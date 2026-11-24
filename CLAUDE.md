@@ -160,6 +160,20 @@ same unit as `daily_create`), not the whole 2000/day quota.
   Python that should open the app. The app runs all network calls and
   subprocesses off the Tk main thread, so the window doesn't freeze.
 
+## Task status (`task_status.py`)
+
+Read-only status reader for the planner's "Daily tasks" view.
+`collect_status(now=None)` never raises; errors go into `errors` /
+`tasks_error`. Scheduled tasks are found by name marker (`TASK_NAME_MARKERS`:
+`MandsOzon`, `OzonSales_`; the price/stock/H&M stock tasks behind `run_*.bat`
+are `OzonSales_Daily*`), not a hard-coded list. The only scheduler call is
+`schtasks /query /fo CSV /v`: never create, change, run or end a task from
+here. Headers are matched by name (English plus Turkish aliases), then by
+English column position. Also reads `daily_run_status.json` (local date,
+`stale` if not today) and the optional `hm_stock_last_run.json` /
+`catalog_status.json['runs']`. Run it off the Tk main thread, because schtasks
+can be slow.
+
 ## Category/type mapping (`ozon_mapping.py`)
 
 `resolve_category_and_type(name, is_set_hint)` is the single source of truth
