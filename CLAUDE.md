@@ -95,7 +95,11 @@ configured".
 `install_desktop_shortcut.py`): a tabbed tkinter window with three tabs —
 Overview, Daily tasks and Prioritization. The planner (view of quota / plan /
 pool per brand × category, and the editor for `daily_plan.json`) lives on the
-Prioritization tab, which the app opens on. New tabs plug in through
+Prioritization tab, which the app opens on. The Overview tab reads
+`account_snapshot.json` (offers / for sale / products / articles per brand,
+warehouses, sizes, warning colour past 26h) plus `catalog_status.json`
+freshness. Its Refresh runs `account_snapshot.py`, which is offline and only
+writes that local file. New tabs plug in through
 `planner_ui.register_tab(name, builder)` (`builder(app, parent_frame)`; tabs
 must hand UI updates back through `app.post`, never touch Tk from a thread).
 The whole app is read-only toward Ozon (only `/v4/product/info/limit`; the

@@ -367,8 +367,9 @@ def test_register_tab_changes_are_restored():
 
 def test_read_only_endpoints_and_commands_unchanged():
     assert ui.READ_ONLY_ENDPOINTS == frozenset({"/v4/product/info/limit"})
-    assert set(ui.COMMANDS) == {"catalog_status", "inventory", "walk", "preview"}
+    assert set(ui.COMMANDS) == {"catalog_status", "inventory", "walk", "preview", "account_snapshot"}
     assert ui.COMMANDS["catalog_status"] == ["catalog_status.py"]
     assert ui.COMMANDS["inventory"] == ["category_inventory.py"]
     assert ui.COMMANDS["walk"] == ["category_inventory.py", "--walk"]
     assert ui.COMMANDS["preview"] == ["upload_to_ozon.py", "--dry-run"]
+    assert ui.COMMANDS["account_snapshot"] == ["account_snapshot.py"]

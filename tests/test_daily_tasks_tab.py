@@ -443,7 +443,7 @@ def test_daily_tab_registered_and_order_unchanged():
     assert ui.TAB_NAMES == ("Overview", "Daily tasks", "Prioritization")
     assert list(ui.TAB_BUILDERS) == list(ui.TAB_NAMES)
     assert ui.DEFAULT_TAB == "Prioritization"
-    assert set(ui.COMMANDS) == {"catalog_status", "inventory", "walk", "preview"}
+    assert set(ui.COMMANDS) == {"catalog_status", "inventory", "walk", "preview", "account_snapshot"}
     assert set(ui.TIMEOUTS) == set(ui.COMMANDS)
 
 

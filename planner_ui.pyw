@@ -2,7 +2,11 @@
 Ozon Sales -- tabbed desktop app (one ttk.Notebook window).
 
 Tabs, in order:
-  * Overview -- placeholder ("Coming soon")
+  * Overview -- account status from account_snapshot.json: KPI cards
+    (offers / for sale / products / articles, split M&S / H&M / Other),
+    brands, offers by warehouse, sizes (top 15 / show all), 'data as of'
+    (warning colour when older than 26h) and catalog_status.json freshness.
+    Refresh runs account_snapshot.py (offline) and reloads.
   * Daily tasks -- view-only status (DailyTasksTab): scheduled MandsOzon* /
     OzonSales_* tasks (next run, last run, coloured result), the latest
     daily_run card with its per-step list, a stale banner when
@@ -36,7 +40,8 @@ Prioritization tab:
     (upload_to_ozon.py --dry-run)
 
 The app is still READ-ONLY toward Ozon: the only Ozon call is the quota read, and the only
-scripts it starts are the read-only snapshots plus the upload's --dry-run.
+scripts it starts are the read-only snapshots (catalog_status.py,
+category_inventory.py, the offline account_snapshot.py) plus the upload's --dry-run.
 Uploads happen in the scheduled runs, never from here. Every Ozon call and
 subprocess runs off the UI thread; results come back through a queue
 that the UI thread drains on a root.after poll.
@@ -89,15 +94,19 @@ QUOTA_ENDPOINT = "/v4/product/info/limit"
 READ_ONLY_ENDPOINTS = frozenset({QUOTA_ENDPOINT})
 
 # Every subprocess the app can start. None of them writes to Ozon:
-# catalog_status.py / category_inventory.py are read-only snapshots and the
-# upload only runs with --dry-run (exits before /v3/product/import).
+# catalog_status.py / category_inventory.py are read-only snapshots,
+# account_snapshot.py is offline (local JSON only, writes just the local
+# account_snapshot.json) and the upload only runs with --dry-run (exits
+# before /v3/product/import).
 COMMANDS = {
     "catalog_status": ["catalog_status.py"],
     "inventory": ["category_inventory.py"],
     "walk": ["category_inventory.py", "--walk"],
     "preview": ["upload_to_ozon.py", "--dry-run"],
+    "account_snapshot": ["account_snapshot.py"],
 }
-TIMEOUTS = {"catalog_status": 15 * 60, "inventory": 15 * 60, "walk": 8 * 3600, "preview": 30 * 60}
+TIMEOUTS = {"catalog_status": 15 * 60, "inventory": 15 * 60, "walk": 8 * 3600, "preview": 30 * 60,
+            "account_snapshot": 5 * 60}
 
 BG, CARD, FG, MUTED, LINE = "#1c1c1a", "#262624", "#ecebe7", "#a09f9a", "#3a3a37"
 STATUS = {"good": "#3fa66a", "warning": "#d9a43a", "serious": "#e07b39", "critical": "#e5534b", "running": "#4c8bf5"}
@@ -746,6 +755,202 @@ def level_color(level):
         return MUTED
 
 
+# --- Overview data shaping (pure; no Tk, never raises) ----------------------------
+
+ACCOUNT_SNAPSHOT_FILE = "account_snapshot.json"
+OVERVIEW_BRANDS = ("M&S", "H&M", "Other")
+# Must match catalog_status.FRESH_HOURS (a test checks it). Not imported:
+# catalog_status pulls in ozon_client at import and reconfigures stdout.
+SNAPSHOT_STALE_HOURS = 26
+SIZES_TOP_N = 15
+NO_SNAPSHOT_TEXT = "No snapshot yet: click Refresh"
+CORRUPT_SNAPSHOT_TEXT = "Snapshot unreadable (account_snapshot.json is corrupt): click Refresh"
+WAREHOUSE_FIXED = ("Small items", "Regular", "Unassigned")
+WAREHOUSE_UNKNOWN_NOTE = "Unknown: no live offer_id list"
+CATALOG_MISSING_NOTE = "catalog_status.json not available"
+KPI_SPEC = (("offers", "Total offers", None), ("for_sale", "For sale", None),
+            ("products", "Products", "canonical MS- ids only"),
+            ("articles", "Articles", "canonical MS- ids only"))
+
+
+def _is_count(v):
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _dict(v):
+    return v if isinstance(v, dict) else {}
+
+
+def load_snapshot(path):
+    """(snapshot dict | None, 'ok' | 'missing' | 'corrupt')."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return None, "missing"
+    except Exception:
+        return None, "corrupt"
+    if not isinstance(data, dict) or not isinstance(data.get("brands"), dict) \
+            or not isinstance(data.get("total"), dict):
+        return None, "corrupt"
+    return data, "ok"
+
+
+def snapshot_placeholder(state):
+    if state == "missing":
+        return NO_SNAPSHOT_TEXT
+    if state == "corrupt":
+        return CORRUPT_SNAPSHOT_TEXT
+    return None
+
+
+def fmt_num(v):
+    return f"{v:,}" if _is_count(v) else "—"
+
+
+def _brand(snap, b):
+    return _dict(_dict(_dict(snap).get("brands")).get(b))
+
+
+def _total(snap):
+    return _dict(_dict(snap).get("total"))
+
+
+def kpi_cards(snap):
+    """Four KPI cards: total value plus the M&S / H&M / Other split."""
+    cards = []
+    for key, title, note in KPI_SPEC:
+        split = [(b, fmt_num(_brand(snap, b).get(key))) for b in OVERVIEW_BRANDS]
+        cards.append({"key": key, "title": title, "value": fmt_num(_total(snap).get(key)),
+                      "split": split, "sub": " · ".join(f"{b} {v}" for b, v in split),
+                      "note": note})
+    return cards
+
+
+BRAND_TABLE_COLUMNS = (("brand", "Brand", 70), ("offers", "Offers", 80), ("for_sale", "For sale", 80),
+                       ("products", "Products", 80), ("articles", "Articles", 80),
+                       ("unparsed", "Unparsed", 80), ("sizes_count", "Sizes", 60))
+
+
+def _sizes_count(sizes):
+    return len(sizes) if isinstance(sizes, dict) else None
+
+
+def brand_rows(snap):
+    rows = []
+    for name, d in [(b, _brand(snap, b)) for b in OVERVIEW_BRANDS] + [("Total", _total(snap))]:
+        rows.append({"brand": name, "offers": d.get("offers"), "for_sale": d.get("for_sale"),
+                     "products": d.get("products"), "articles": d.get("articles"),
+                     "unparsed": d.get("unparsed"), "sizes_count": _sizes_count(d.get("sizes"))})
+    return rows
+
+
+def warehouse_rows(snap):
+    """(columns, rows); rows are [label, M&S, H&M, Other, Total]. Fixed labels
+    first, then any 'Other <id>' labels sorted. [] when unknown."""
+    columns = ["Warehouse"] + list(OVERVIEW_BRANDS) + ["Total"]
+    wh = _dict(snap).get("offers_by_warehouse")
+    if not isinstance(wh, dict):
+        return columns, []
+    total = _dict(wh.get("total"))
+    by_brand = _dict(wh.get("by_brand"))
+    seen = set(total)
+    for b in OVERVIEW_BRANDS:
+        seen |= set(_dict(by_brand.get(b)))
+    extra = sorted(str(k) for k in seen if k not in WAREHOUSE_FIXED)
+    rows = []
+    for label in list(WAREHOUSE_FIXED) + extra:
+        vals = []
+        for b in OVERVIEW_BRANDS:
+            v = _dict(by_brand.get(b)).get(label, 0)
+            vals.append(v if _is_count(v) else 0)
+        t = total.get(label, 0)
+        rows.append([label] + vals + [t if _is_count(t) else 0])
+    return columns, rows
+
+
+def warehouse_note(snap):
+    return None if isinstance(_dict(snap).get("offers_by_warehouse"), dict) else WAREHOUSE_UNKNOWN_NOTE
+
+
+def size_rows(sizes, top_n=SIZES_TOP_N, show_all=False):
+    """([(size, count)] by count desc then size asc, hidden_count)."""
+    if not isinstance(sizes, dict):
+        return [], 0
+    rows = sorted(((str(k), v) for k, v in sizes.items() if _is_count(v)), key=lambda r: (-r[1], r[0]))
+    if show_all or len(rows) <= top_n:
+        return rows, 0
+    return rows[:top_n], len(rows) - top_n
+
+
+def parse_iso(s):
+    """Naive local datetime, or None. Aware strings are converted to local."""
+    if not isinstance(s, str) or not s.strip():
+        return None
+    try:
+        t = datetime.fromisoformat(s.strip())
+    except ValueError:
+        return None
+    if t.tzinfo is not None:
+        try:
+            t = t.astimezone().replace(tzinfo=None)
+        except Exception:
+            return None
+    return t
+
+
+def is_stale(built_at, now, hours=SNAPSHOT_STALE_HOURS):
+    """Older than `hours` (exactly `hours` is still fresh, like catalog_status.is_fresh)."""
+    t = parse_iso(built_at)
+    if t is None or not isinstance(now, datetime):
+        return True
+    return now - t > timedelta(hours=hours)
+
+
+def fmt_when(s):
+    t = parse_iso(s)
+    return f"{t:%Y-%m-%d %H:%M}" if t else "—"
+
+
+def data_as_of(snap, now):
+    """(text, color_key): color_key is 'warning' when stale, else None."""
+    built = _dict(snap).get("built_at")
+    text = f"data as of {fmt_when(built)}"
+    if is_stale(built, now):
+        return text + f" (stale: older than {SNAPSHOT_STALE_HOURS}h)", "warning"
+    return text, None
+
+
+def freshness_rows(catalog_status, now):
+    """(rows, line, stale): rows are (brand, live, price_fresh, stock_fresh)
+    for brands with a live count; line describes catalog_status.json's age."""
+    if not isinstance(catalog_status, dict):
+        return [], CATALOG_MISSING_NOTE, True
+    brands = _dict(catalog_status.get("brands"))
+    rows = []
+    for b in OVERVIEW_BRANDS:
+        d = _dict(brands.get(b))
+        if _is_count(d.get("live")):
+            rows.append((b, fmt_num(d.get("live")), fmt_num(d.get("price_fresh")), fmt_num(d.get("stock_fresh"))))
+    fh = catalog_status.get("fresh_hours")
+    fh = fh if _is_count(fh) and fh > 0 else SNAPSHOT_STALE_HOURS
+    built = catalog_status.get("built")
+    stale = is_stale(built, now)
+    line = f"catalog_status built {fmt_when(built)} · fresh = pushed OK in the last {fh}h"
+    if stale:
+        line += f" (stale: older than {SNAPSHOT_STALE_HOURS}h)"
+    return rows, line, stale
+
+
+def sources_warnings(snap):
+    out = []
+    for name, info in sorted(_dict(_dict(snap).get("sources")).items()):
+        st = _dict(info).get("status")
+        if st != "ok":
+            out.append(f"{name} {st or 'unknown'}")
+    return out
+
+
 # --- Tabs (pure registration hook; no tkinter at module level) --------------------
 
 APP_TITLE = "Ozon Sales"
@@ -753,7 +958,7 @@ TAB_OVERVIEW = "Overview"
 TAB_DAILY = "Daily tasks"
 TAB_PRIORITIZATION = "Prioritization"
 TAB_NAMES = (TAB_OVERVIEW, TAB_DAILY, TAB_PRIORITIZATION)
-DEFAULT_TAB = TAB_PRIORITIZATION  # Overview is still a placeholder
+DEFAULT_TAB = TAB_PRIORITIZATION  # the planner opens first
 DAILY_REFRESH_MS = 60_000  # Daily tasks auto-refresh interval
 DAILY_FIRST_REFRESH_MS = 100
 
@@ -794,18 +999,6 @@ class _WidgetHelpers:
                               fg=FG, activebackground="#4a4a46", activeforeground=FG, relief="flat",
                               font=(FONT, 9, "bold" if accent else "normal"), padx=10, pady=4,
                               bd=0, cursor="hand2", disabledforeground=DIM)
-
-
-def _placeholder_tab(app, parent, name):
-    f = app.tk.Frame(parent, bg=BG)
-    f.pack(fill="both", expand=True)
-    app.label(f, name, 14, bold=True).pack(anchor="w")
-    app.label(f, "Coming soon", 10, MUTED).pack(anchor="w", pady=(6, 0))
-    return f
-
-
-def build_overview_tab(app, parent):
-    return _placeholder_tab(app, parent, TAB_OVERVIEW)
 
 
 JOB_COLUMNS = (("name", "Task", 260), ("next_run", "Schedule / next run", 190),
@@ -957,6 +1150,194 @@ class DailyTasksTab(_WidgetHelpers):
 
 
 build_daily_tasks_tab = DailyTasksTab  # backward-compatible name
+
+
+class OverviewTab(_WidgetHelpers):
+    """Account status from account_snapshot.json (+ catalog_status.json freshness)."""
+
+    def __init__(self, app, parent):
+        self.app = app
+        self.tk, self.ttk = app.tk, app.ttk
+        self.dpi = app.dpi
+        tk = self.tk
+        self.show_all_sizes = False
+        self.busy = False
+        self.snap, self.state, self.catalog = None, "missing", None
+        self.status_var = tk.StringVar(value="Loaded cached snapshot.")
+
+        outer = tk.Frame(parent, bg=BG)
+        outer.pack(fill="both", expand=True)
+        head = tk.Frame(outer, bg=BG)
+        head.pack(fill="x")
+        self.label(head, "Overview", 14, bold=True).pack(side="left")
+        self.asof_label = self.label(head, "", 9, MUTED)
+        self.asof_label.pack(side="right")
+
+        act = tk.Frame(outer, bg=BG)
+        act.pack(side="bottom", fill="x", pady=(6, 0))
+        self.refresh_btn = self.button(act, "Refresh", self.on_refresh)
+        self.refresh_btn.pack(side="left")
+        tk.Label(act, textvariable=self.status_var, bg=BG, fg=MUTED, font=(FONT, 8),
+                 anchor="w").pack(side="left", fill="x", expand=True, padx=(10, 0))
+        self.label(act, "Refresh runs account_snapshot.py (offline, local files only).", 8, MUTED).pack(side="right")
+
+        self.body = tk.Frame(outer, bg=BG)
+        self.body.pack(fill="both", expand=True)
+
+        self.load_local()
+
+    # ---------- data ----------
+    def load_local(self):
+        """Re-reads the local snapshot + catalog_status.json and redraws."""
+        self.snap, self.state = load_snapshot(HERE / ACCOUNT_SNAPSHOT_FILE)
+        cat = load_json(HERE / CATALOG_STATUS_FILE, None)
+        self.catalog = cat if isinstance(cat, dict) else None
+        self.render()
+
+    # ---------- drawing ----------
+    def _tree(self, parent, columns, height):
+        """columns: [(key, heading, width)]; returns a Treeview packed in parent."""
+        tree = self.ttk.Treeview(parent, columns=[c[0] for c in columns], show="headings",
+                                 selectmode="none", height=height)
+        for i, (key, heading, width) in enumerate(columns):
+            tree.heading(key, text=heading)
+            tree.column(key, width=self.px(width), anchor="w" if i == 0 else "e", stretch=True)
+        tree.tag_configure("total", font=(FONT, 9, "bold"))
+        tree.pack(fill="both", expand=True)
+        return tree
+
+    def _section(self, parent, title, row, col, colspan=1, rowspan=1):
+        f = self.tk.Frame(parent, bg=CARD, padx=8, pady=6)
+        f.grid(row=row, column=col, columnspan=colspan, rowspan=rowspan, sticky="nsew",
+               padx=(0 if col == 0 else 6, 0), pady=(8, 0))
+        self.label(f, title, 9, MUTED, True).pack(anchor="w", pady=(0, 4))
+        return f
+
+    def render(self):
+        """Tears the body down and rebuilds it from self.snap / self.catalog."""
+        for w in self.body.winfo_children():
+            w.destroy()
+        now = datetime.now()
+        if self.state == "ok":
+            text, color = data_as_of(self.snap, now)
+            self.asof_label.configure(text=text, fg=STATUS[color] if color else MUTED)
+        else:
+            self.asof_label.configure(text="", fg=MUTED)
+
+        grid = self.tk.Frame(self.body, bg=BG)
+        grid.pack(fill="both", expand=True)
+        grid.columnconfigure(0, weight=3)
+        grid.columnconfigure(1, weight=1)
+
+        if self.state != "ok":
+            self.label(grid, snapshot_placeholder(self.state), 11, STATUS["warning"]).grid(
+                row=0, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        else:
+            warn = sources_warnings(self.snap)
+            if warn:
+                self.label(grid, "Sources not ok: " + ", ".join(warn), 9, STATUS["warning"]).grid(
+                    row=0, column=0, columnspan=2, sticky="w", pady=(6, 0))
+            self._render_cards(grid)
+            self._render_brands(grid)
+            self._render_warehouses(grid)
+            self._render_sizes(grid)
+        self._render_freshness(grid, now)
+
+    def _render_cards(self, grid):
+        cards = self.tk.Frame(grid, bg=BG)
+        cards.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        for i, c in enumerate(kpi_cards(self.snap)):
+            f = self.tk.Frame(cards, bg=CARD, padx=10, pady=8)
+            f.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 6, 0))
+            cards.columnconfigure(i, weight=1, uniform="k")
+            self.label(f, c["title"], 8, MUTED).pack(anchor="w")
+            self.label(f, c["value"], 15, FG, True).pack(anchor="w")
+            self.label(f, c["sub"], 8, MUTED, wraplength=self.px(240)).pack(anchor="w")
+            if c["note"]:
+                self.label(f, c["note"], 7, DIM).pack(anchor="w")
+
+    def _render_brands(self, grid):
+        f = self._section(grid, "Brands", 2, 0)
+        tree = self._tree(f, BRAND_TABLE_COLUMNS, 4)
+        for row in brand_rows(self.snap):
+            tree.insert("", "end", values=[row["brand"]] + [fmt_num(row[k]) for k, _, _ in BRAND_TABLE_COLUMNS[1:]],
+                        tags=("total",) if row["brand"] == "Total" else ())
+
+    def _render_warehouses(self, grid):
+        f = self._section(grid, "Offers by warehouse", 3, 0)
+        columns, rows = warehouse_rows(self.snap)
+        note = warehouse_note(self.snap)
+        if note:
+            self.label(f, note, 9, STATUS["warning"]).pack(anchor="w")
+            return
+        tree = self._tree(f, [(f"c{i}", name, 110 if i == 0 else 70) for i, name in enumerate(columns)],
+                          max(3, min(len(rows), 6)))
+        for r in rows:
+            tree.insert("", "end", values=[r[0]] + [fmt_num(v) for v in r[1:]])
+
+    def _render_sizes(self, grid):
+        f = self._section(grid, "Sizes (all brands)", 2, 1, rowspan=3)
+        rows, hidden = size_rows(_total(self.snap).get("sizes"), show_all=self.show_all_sizes)
+        if not rows:
+            self.label(f, "No size data (canonical MS- ids only).", 9, MUTED).pack(anchor="w")
+            return
+        if hidden or self.show_all_sizes:
+            text = f"Show all ({hidden} more)" if hidden else f"Show top {SIZES_TOP_N}"
+            self.button(f, text, self.on_toggle_sizes).pack(side="bottom", anchor="w", pady=(4, 0))
+        wrap = self.tk.Frame(f, bg=CARD)
+        wrap.pack(fill="both", expand=True)
+        tree = self.ttk.Treeview(wrap, columns=["size", "count"], show="headings", selectmode="none",
+                                 height=min(len(rows), SIZES_TOP_N))
+        tree.heading("size", text="Size")
+        tree.heading("count", text="Offers")
+        tree.column("size", width=self.px(90), anchor="w", stretch=True)
+        tree.column("count", width=self.px(70), anchor="e", stretch=True)
+        sb = self.ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=sb.set)
+        tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        for size, n in rows:
+            tree.insert("", "end", values=[size, fmt_num(n)])
+
+    def _render_freshness(self, grid, now):
+        f = self._section(grid, "Catalog freshness (catalog_status.json)", 4, 0)
+        rows, line, stale = freshness_rows(self.catalog, now)
+        self.label(f, line, 8, STATUS["warning"] if stale else MUTED).pack(anchor="w")
+        if rows:
+            tree = self._tree(f, [("brand", "Brand", 70), ("live", "Live", 80),
+                                  ("price_fresh", "Price fresh", 90), ("stock_fresh", "Stock fresh", 90)],
+                              len(rows))
+            for r in rows:
+                tree.insert("", "end", values=list(r))
+
+    # ---------- actions (the subprocess runs in a thread) ----------
+    def on_toggle_sizes(self):
+        self.show_all_sizes = not self.show_all_sizes
+        self.render()
+
+    def on_refresh(self):
+        if self.busy:
+            return
+        self.busy = True
+        self.refresh_btn.configure(state="disabled")
+        self.status_var.set(f"Running account_snapshot.py since {datetime.now():%H:%M}…")
+
+        def work():
+            rc, out = run_script("account_snapshot")
+            self.app.post(self._refresh_done, rc, out)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _refresh_done(self, rc, out):
+        self.busy = False
+        self.refresh_btn.configure(state="normal")
+        ok = "ok" if rc == 0 else ("failed" if rc is not None else "not run")
+        self.status_var.set(f"Refreshed {datetime.now():%H:%M}: account_snapshot.py {ok}"
+                            + ("" if rc == 0 else f" ({tail(out, 1)})"))
+        self.load_local()
+
+
+build_overview_tab = OverviewTab  # backward-compatible name
 
 
 class PrioritizationTab(_WidgetHelpers):
@@ -1415,7 +1796,7 @@ class PrioritizationTab(_WidgetHelpers):
         txt.configure(state="disabled")
 
 
-register_tab(TAB_OVERVIEW, build_overview_tab)
+register_tab(TAB_OVERVIEW, OverviewTab)
 register_tab(TAB_DAILY, DailyTasksTab)
 register_tab(TAB_PRIORITIZATION, PrioritizationTab)
 
