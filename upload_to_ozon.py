@@ -231,7 +231,14 @@ def check_quota():
 
 def find_existing_offer_ids(offer_ids):
     """Checks which of these offer_ids already exist on Ozon (updates, not creates —
-    don't count against daily_create quota). Queries in batches of 1000 (API max)."""
+    don't count against daily_create quota). Queries in batches of 1000 (API max).
+
+    Retries a failing PAGE on top of ozon_client.call's own per-request retries --
+    confirmed live, 2026-10-28: two full-script runs died at the same page with a
+    ConnectionResetError despite call()'s internal 3 retries, so one bad page
+    shouldn't abort the whole ~55-batch scan."""
+    import time
+
     existing = set()
     offer_ids = list(offer_ids)
     for i in range(0, len(offer_ids), 1000):
@@ -241,7 +248,17 @@ def find_existing_offer_ids(offer_ids):
             params = {"filter": {"offer_id": batch}, "limit": 1000}
             if cursor:
                 params["last_id"] = cursor
-            result = call("/v3/product/list", params)
+
+            for attempt in range(3):
+                try:
+                    result = call("/v3/product/list", params)
+                    break
+                except RuntimeError as e:
+                    if attempt == 2:
+                        raise
+                    print(f"  ! product/list page failed (attempt {attempt + 1}/3): {e} -- retrying in 10s...")
+                    time.sleep(10)
+
             page = result.get("result", {})
             for item in page.get("items", []):
                 existing.add(item["offer_id"])
