@@ -44,3 +44,5 @@ upload_skipped_offsets.json
 content_rating_snapshot.json
 content_attr_schema_cache.json
 content_attr_values_cache.json
+catalog_live_offer_ids.json
+catalog_live_offer_ids.json.tmp

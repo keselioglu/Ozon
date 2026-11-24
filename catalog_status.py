@@ -14,6 +14,7 @@ stock_update_history.jsonl, hm_stock_update_history.jsonl), capped at the live c
 Pushes nothing.
 """
 import json
+import os
 import re
 import sys
 from datetime import datetime, timedelta
@@ -27,6 +28,7 @@ from margin_pricing import get_real_stock
 from warehouse_routing import MS_FAMILY_PREFIXES
 
 OUT = Path(__file__).with_name("catalog_status.json")
+LIVE_IDS_OUT = Path(__file__).with_name("catalog_live_offer_ids.json")
 HM_RE = re.compile(r"^(HM\d?-|\d-HM-)")
 FRESH_HOURS = 26
 URL_DAYS = 3
@@ -51,6 +53,20 @@ def live_offer_ids():
         last = res.get("last_id")
         if not last or not res["items"]:
             return ids
+
+
+def write_live_ids(path, ids, built):
+    """Atomically write {"built", "count", "offer_ids"} (sorted) to path:
+    temp file in the same dir, then os.replace, so readers never see a half-written file."""
+    path = Path(path)
+    data = {"built": built, "count": len(ids), "offer_ids": sorted(ids)}
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
 
 
 def last_run(path, ok_key):
@@ -131,10 +147,12 @@ def main():
             b[brand_name][field] = min(n, b[brand_name]["live"])
 
     total = {k: sum(x[k] for x in b.values()) for k in ("live", "url_ok", "for_sale", "price_fresh", "stock_fresh")}
-    out = {"built": datetime.now().isoformat(timespec="seconds"), "fresh_hours": FRESH_HOURS,
+    built = datetime.now().isoformat(timespec="seconds")
+    out = {"built": built, "fresh_hours": FRESH_HOURS,
            "brands": b, "total": total,
            "runs": {k: {"when": w, "ok": n, "fresh": is_fresh(w)} for k, (w, n) in runs.items()}}
     OUT.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
+    write_live_ids(LIVE_IDS_OUT, ids, built)
     print(json.dumps(out, ensure_ascii=False))
     return 0
 
