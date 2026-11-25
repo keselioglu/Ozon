@@ -88,8 +88,36 @@ snapshot numbers. If the metric gathering crashes, a minimal "Daily report
 failed: <ExceptionType>" message (plus the run status lines) is still sent
 and the exception is re-raised. Without TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID
 in .env, send_telegram() just logs "Telegram not sent: not configured".
+Overview metrics (task #92): gather_report() also writes overview_metrics.json
+(gitignored, written atomically by write_overview_metrics(), right after the
+metrics are computed and before the GitHub post, so a gh failure doesn't lose
+it) for the Ozon Sales app's Overview tab. A failure here never stops the
+report. Shape:
+  {"version": 1, "built_at": <ISO local time>,
+   "campaigns": {live_skus (distinct enrolled product ids), ratio_count,
+                 avg_ratio_pct, min_ratio_pct, max_ratio_pct},
+   "sales": {window_from, window_to, revenue_usd, orders, units, skus,
+             avg_ms_cost_pct, warehouse_pct {small, regular, unknown},
+             brand_pct {M&S, H&M, Other}, top_category {label, units} | null,
+             non_usd_skipped} | null}
+Campaign ratios = M&S cost (TRY->USD) / action_price via compute_ratio_pct;
+products with no M&S cost count in live_skus only. The sales window is
+"34h": local midnight of yesterday until the run time (~10:00), sent to the
+posting APIs in UTC (sales_window_34h()). summarize_sales() applies the same
+rules as get_sales_window() (cancelled postings and non-USD items excluded,
+avg_ms_cost_pct M&S-only and quantity-weighted). orders = non-cancelled
+postings with at least one counted USD item; skus = distinct offer_ids sold.
+Splits are by units: warehouse from the FBS posting's
+delivery_method.warehouse_id when it is the small/regular warehouse, else
+warehouse_assignments.json, else unknown; brand via
+daily_plan.brand_for_offer_id(); category via products.csv article code ->
+daily_plan label ("Unknown" if unresolved, only picked as top when nothing
+else sold). Unknown values are null; splits are 0% when nothing sold. The
+24h snapshot, markdown, Telegram text and daily_report_history.jsonl are
+unchanged.
 """
 import json
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -99,6 +127,7 @@ if sys.platform == "win32":
 
 import shutil
 import subprocess
+from collections import Counter
 from pathlib import Path
 
 import telegram_notify
@@ -114,6 +143,8 @@ HISTORY_FILE = "daily_report_history.jsonl"
 NEW_ITEMS_LOG = "new_items_submitted.json"
 CATALOG_MARGIN_FILE = "catalog_margin_risk_today.json"
 # Written by daily_run.py (write_run_status()), dated with daily_run's LOCAL date.
+OVERVIEW_METRICS_FILE = "overview_metrics.json"
+OVERVIEW_METRICS_VERSION = 1
 RUN_STATUS_FILE = Path(__file__).resolve().parent / "daily_run_status.json"
 TELEGRAM_MAX_PROBLEMS = 5
 
@@ -175,8 +206,10 @@ def get_stock_freshness():
     return up_to_date, unknown, total_live
 
 
-def get_campaign_stats(usd_try_rate, ms_prices):
-    """(enrolled_count, avg_ratio_pct_or_None)."""
+def get_campaign_metrics(usd_try_rate, ms_prices):
+    """{live_skus, ratio_count, avg_ratio_pct, min_ratio_pct, max_ratio_pct}.
+    live_skus = distinct enrolled product ids across every active campaign;
+    the ratios cover enrolled entries whose offer has an M&S cost."""
     campaigns = list_active_campaigns()
     enrolled_ids = set()
     all_enrolled = []
@@ -208,8 +241,38 @@ def get_campaign_stats(usd_try_rate, ms_prices):
             if ratio is not None:
                 ratios.append(ratio)
 
-    avg_ratio = round(sum(ratios) / len(ratios), 1) if ratios else None
-    return len(enrolled_ids), avg_ratio
+    return {
+        "live_skus": len(enrolled_ids),
+        "ratio_count": len(ratios),
+        "avg_ratio_pct": round(sum(ratios) / len(ratios), 1) if ratios else None,
+        "min_ratio_pct": round(min(ratios), 1) if ratios else None,
+        "max_ratio_pct": round(max(ratios), 1) if ratios else None,
+    }
+
+
+class CampaignStats(tuple):
+    """The old (enrolled_count, avg_ratio_pct_or_None) tuple, plus the full
+    get_campaign_metrics() dict as .metrics."""
+    def __new__(cls, metrics):
+        obj = super().__new__(cls, (metrics["live_skus"], metrics["avg_ratio_pct"]))
+        obj.metrics = metrics
+        return obj
+
+
+def get_campaign_stats(usd_try_rate, ms_prices):
+    """(enrolled_count, avg_ratio_pct_or_None); the full dict is on .metrics."""
+    return CampaignStats(get_campaign_metrics(usd_try_rate, ms_prices))
+
+
+def campaign_metrics_from_stats(stats):
+    """The metrics dict behind a get_campaign_stats() result. A plain tuple
+    (no .metrics) gives the count/avg with the other ratios unknown (null)."""
+    metrics = getattr(stats, "metrics", None)
+    if isinstance(metrics, dict):
+        return metrics
+    count, avg = stats
+    return {"live_skus": count, "ratio_count": None, "avg_ratio_pct": avg,
+            "min_ratio_pct": None, "max_ratio_pct": None}
 
 
 def get_total_live_count():
@@ -354,6 +417,176 @@ def get_sales_window(date_from, date_to):
         "non_ms_excluded_count": non_ms_excluded,
         "non_usd_skipped_count": non_usd_skipped,
     }
+
+
+def sales_window_34h(now=None):
+    """(window_from, window_to) as aware LOCAL datetimes: local midnight of
+    yesterday until now. Convert with .astimezone(timezone.utc) for the API."""
+    now = (now or datetime.now()).astimezone()
+    yesterday = (now - timedelta(days=1)).date()
+    window_from = datetime(yesterday.year, yesterday.month, yesterday.day,
+                           tzinfo=now.tzinfo)
+    return window_from, now
+
+
+def _pct_split(counts, keys):
+    """{key: % of total} rounded to 0.1 with the largest-remainder method, so
+    a non-empty split adds up to exactly 100.0. All 0.0 when total is 0."""
+    total = sum(counts.get(k, 0) for k in keys)
+    if total <= 0:
+        return {k: 0.0 for k in keys}
+    tenths = {k: counts.get(k, 0) * 1000 / total for k in keys}
+    floors = {k: int(v) for k, v in tenths.items()}
+    left = 1000 - sum(floors.values())
+    # Biggest remainder first; ties (to float noise) go to the bigger count.
+    order = sorted(keys, key=lambda k: (-round(tenths[k] - floors[k], 9), -counts.get(k, 0)))
+    for k in order[:left]:
+        floors[k] += 1
+    return {k: floors[k] / 10 for k in keys}
+
+
+def _warehouse_key(wid):
+    try:
+        wid = int(wid)
+    except (TypeError, ValueError):
+        return None
+    if wid == SMALL_WAREHOUSE_ID:
+        return "small"
+    if wid == REGULAR_WAREHOUSE_ID:
+        return "regular"
+    return None
+
+
+def _iso(dt):
+    return dt.isoformat() if isinstance(dt, datetime) else dt
+
+
+def summarize_sales(postings, ms_prices, usd_try_rate, assignments, article_labels,
+                    window_from=None, window_to=None):
+    """Pure 34h sales summary for overview_metrics.json (see module docstring).
+    Same counting rules as get_sales_window(). Never raises on empty input."""
+    import daily_plan
+    from ozon_mapping import extract_article_code_from_offer_id
+
+    ms_prices = ms_prices or {}
+    assignments = assignments or {}
+    article_labels = article_labels or {}
+
+    revenue = 0.0
+    units = 0
+    orders = 0
+    skus = set()
+    ms_ratio_sum = 0.0
+    ms_ratio_units = 0
+    non_usd_skipped = 0
+    wh_units = Counter()
+    brand_units = Counter()
+    cat_units = Counter()
+
+    for posting in postings or []:
+        if not isinstance(posting, dict) or posting.get("status") in CANCELLED_STATUSES:
+            continue
+        posting_wh = _warehouse_key(
+            (posting.get("delivery_method") or {}).get("warehouse_id"))
+        counted = False
+        for item in posting.get("products") or []:
+            quantity = item.get("quantity", 0) or 0
+            if quantity <= 0:
+                continue
+            if item.get("currency_code") != "USD":
+                non_usd_skipped += quantity
+                continue
+            counted = True
+            price = float(item.get("price", 0) or 0)
+            offer_id = item.get("offer_id") or ""
+            units += quantity
+            revenue += price * quantity
+            if offer_id:
+                skus.add(offer_id)
+
+            wh = posting_wh or _warehouse_key(assignments.get(offer_id)) or "unknown"
+            wh_units[wh] += quantity
+            brand_units[daily_plan.brand_for_offer_id(offer_id)] += quantity
+            code = extract_article_code_from_offer_id(offer_id) if offer_id else None
+            label = article_labels.get(code) if code else None
+            cat_units[label or "Unknown"] += quantity
+
+            if is_ms_offer_id(offer_id) and usd_try_rate:
+                ms_entry = ms_prices.get(offer_id)
+                if ms_entry:
+                    ratio = compute_ratio_pct(ms_entry[0], price, usd_try_rate)
+                    if ratio is not None:
+                        ms_ratio_sum += ratio * quantity
+                        ms_ratio_units += quantity
+        if counted:
+            orders += 1
+
+    top_category = None
+    known = [(lbl, n) for lbl, n in cat_units.items() if lbl != "Unknown"]
+    pool = known or list(cat_units.items())
+    if pool:
+        lbl, n = sorted(pool, key=lambda x: (-x[1], x[0]))[0]
+        top_category = {"label": lbl, "units": n}
+
+    return {
+        "window_from": _iso(window_from),
+        "window_to": _iso(window_to),
+        "revenue_usd": round(revenue, 2),
+        "orders": orders,
+        "units": units,
+        "skus": len(skus),
+        "avg_ms_cost_pct": round(ms_ratio_sum / ms_ratio_units, 1) if ms_ratio_units else None,
+        "warehouse_pct": _pct_split(wh_units, ("small", "regular", "unknown")),
+        "brand_pct": _pct_split(brand_units, ("M&S", "H&M", "Other")),
+        "top_category": top_category,
+        "non_usd_skipped": non_usd_skipped,
+    }
+
+
+def get_sales_34h(ms_prices, usd_try_rate, now=None):
+    """Fetches the 34h window's postings (read-only) and summarizes them."""
+    import daily_plan
+    window_from, window_to = sales_window_34h(now)
+    utc_from = window_from.astimezone(timezone.utc)
+    utc_to = window_to.astimezone(timezone.utc)
+    postings = fetch_fbs_postings(utc_from, utc_to) + fetch_fbo_postings(utc_from, utc_to)
+    labels = daily_plan._article_labels(daily_plan.PRODUCTS_CSV) if postings else {}
+    return summarize_sales(postings, ms_prices, usd_try_rate, load_warehouse_assignments(),
+                           labels, window_from, window_to)
+
+
+def overview_metrics_path():
+    """overview_metrics.json sits next to daily_report_history.jsonl."""
+    return os.path.join(os.path.dirname(os.path.abspath(HISTORY_FILE)), OVERVIEW_METRICS_FILE)
+
+
+def build_overview_metrics(campaigns, sales, now=None):
+    return {
+        "version": OVERVIEW_METRICS_VERSION,
+        "built_at": (now or datetime.now()).astimezone().isoformat(timespec="seconds"),
+        "campaigns": campaigns,
+        "sales": sales,
+    }
+
+
+def write_overview_metrics(campaigns, sales, path=OVERVIEW_METRICS_FILE, now=None):
+    """Atomically writes overview_metrics.json (tmp file + os.replace)."""
+    data = build_overview_metrics(campaigns, sales, now)
+    path = os.path.abspath(path)
+    tmp = os.path.join(os.path.dirname(path), "." + os.path.basename(path) + ".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    return data
 
 
 def load_yesterday_snapshot():
@@ -584,7 +817,9 @@ def gather_report():
         quota_left = dc.get("limit", 0) - dc.get("usage", 0)
 
     print("Campaign stats...")
-    enrolled_count, avg_campaign_ratio = get_campaign_stats(usd_try_rate, ms_prices)
+    campaign_stats = get_campaign_stats(usd_try_rate, ms_prices)
+    enrolled_count, avg_campaign_ratio = campaign_stats
+    campaign_metrics = campaign_metrics_from_stats(campaign_stats)
 
     print("Catalog margin flagged count...")
     catalog_flagged = get_catalog_margin_flagged_count()
@@ -594,6 +829,17 @@ def gather_report():
 
     print("Sales (last 24h, via posting lists)...")
     sales_today = get_sales_window(now - timedelta(hours=24), now)
+
+    print("Overview metrics (campaigns + 34h sales)...")
+    try:
+        sales_34h = None
+        try:
+            sales_34h = get_sales_34h(ms_prices, usd_try_rate)
+        except Exception as e:
+            print(f"  34h sales failed: {type(e).__name__}: {e}")
+        write_overview_metrics(campaign_metrics, sales_34h, path=overview_metrics_path())
+    except Exception as e:
+        print(f"  overview_metrics.json not written: {type(e).__name__}: {e}")
 
     snapshot = {
         "date": today_str,
