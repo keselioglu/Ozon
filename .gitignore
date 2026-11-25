@@ -53,3 +53,7 @@ account_snapshot.json
 overview_metrics.json
 .overview_metrics.json.tmp
 available_to_add.json
+new_source_requests.json
+new_source_requests.json.bak
+.new_source_requests_*.tmp
+.tasks_*.tmp

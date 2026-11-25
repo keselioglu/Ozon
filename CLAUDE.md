@@ -230,6 +230,15 @@ same unit as `daily_create`), not the whole 2000/day quota.
   creating the new one fails, the old one is left alone). The app runs all network calls and
   subprocesses off the Tk main thread, so the window doesn't freeze.
 
+## New product sources (`new_sources.py`)
+
+Tk-free, offline (never fetches the URL; a test forbids network imports).
+`create_request(url, description)` validates (http(s) URL with a host;
+description 1-1000 chars), refuses a duplicate URL (host case / trailing
+slash ignored), appends the record to gitignored `new_source_requests.json`
+(atomic; a corrupt file is kept as `.bak`) and inserts an `EPIC:` bullet
+block under `## Todo` in TASKS.md (rest of the file unchanged).
+
 ## Task status (`task_status.py`)
 
 Read-only status reader for the Ozon Sales app's "Daily tasks" tab.
