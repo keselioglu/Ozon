@@ -112,9 +112,12 @@ configured".
 tkinter window with three tabs:
 
 - **Overview**: account snapshot from `account_snapshot.json` (built daily by
-  `account_snapshot.py`, pipeline step 15): offers / for sale / products /
-  articles per brand, warehouses, sizes, warning colour past 26h, plus
-  `catalog_status.json` freshness. Its Refresh runs `account_snapshot.py`,
+  `account_snapshot.py`, pipeline step 15): KPI cards (Total SKUs, For sale,
+  Stock / Price up to date (24h), each split M&S / H&M / Other with its % of
+  total SKUs), Brands (SKUs / for sale), Warehouses (live SKUs, avg/min/max
+  live price in USD), a Campaigns card and a "Sales last 34 hours" card
+  (from the 10:00 report's metrics; warning colour past 26h, and "No
+  sales/campaign data yet" until it has run). Its Refresh runs `account_snapshot.py`,
   which is offline and only writes that local file.
 - **Daily tasks**: `task_status.py` → `schtasks /query /fo CSV /v` +
   `daily_run_status.json`. View-only (see Task status below).

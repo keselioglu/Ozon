@@ -2,10 +2,14 @@
 Ozon Sales -- tabbed desktop app (one ttk.Notebook window).
 
 Tabs, in order:
-  * Overview -- account status from account_snapshot.json: KPI cards
-    (offers / for sale / products / articles, split M&S / H&M / Other),
-    brands, offers by warehouse, sizes (top 15 / show all), 'data as of'
-    (warning colour when older than 26h) and catalog_status.json freshness.
+  * Overview -- account status from account_snapshot.json (version 2):
+    KPI cards (Total SKUs / For sale / Stock up to date (24h) / Price up to
+    date (24h), each with the M&S / H&M / Other split and its share of total
+    SKUs), Brands (SKUs / for sale + Total), Warehouses (live SKUs and
+    avg / min / max live price in USD), a Campaigns card and a 'Sales last
+    34 hours' card (both from the 10:00 daily report's overview_metrics,
+    warning colour when metrics_built_at is older than 26h), 'data as of'
+    (warning colour when older than 26h) and any source that isn't ok.
     Refresh runs account_snapshot.py (offline) and reloads.
   * Daily tasks -- view-only status (DailyTasksTab): scheduled MandsOzon* /
     OzonSales_* tasks (next run, last run, coloured result), the latest
@@ -774,19 +778,26 @@ OVERVIEW_BRANDS = ("M&S", "H&M", "Other")
 # Must match catalog_status.FRESH_HOURS (a test checks it). Not imported:
 # catalog_status pulls in ozon_client at import and reconfigures stdout.
 SNAPSHOT_STALE_HOURS = 26
-SIZES_TOP_N = 15
 NO_SNAPSHOT_TEXT = "No snapshot yet: click Refresh"
 CORRUPT_SNAPSHOT_TEXT = "Snapshot unreadable (account_snapshot.json is corrupt): click Refresh"
+NO_METRICS_TEXT = "No sales/campaign data yet: the 10:00 daily report writes it"
 WAREHOUSE_FIXED = ("Small items", "Regular", "Unassigned")
 WAREHOUSE_UNKNOWN_NOTE = "Unknown: no live offer_id list"
-CATALOG_MISSING_NOTE = "catalog_status.json not available"
-KPI_SPEC = (("offers", "Total offers", None), ("for_sale", "For sale", None),
-            ("products", "Products", "canonical MS- ids only"),
-            ("articles", "Articles", "canonical MS- ids only"))
+KPI_SPEC = (("offers", "Total SKUs"), ("for_sale", "For sale"),
+            ("stock_up_to_date", "Stock up to date (24h)"),
+            ("price_up_to_date", "Price up to date (24h)"))
+CAMPAIGNS_TITLE = "Campaigns"
+SALES_TITLE = "Sales last 34 hours"
 
 
 def _is_count(v):
     return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _is_number(v):
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    return v == v and v not in (float("inf"), float("-inf"))
 
 
 def _dict(v):
@@ -820,6 +831,22 @@ def fmt_num(v):
     return f"{v:,}" if _is_count(v) else "—"
 
 
+def fmt_usd(v):
+    return f"${v:,.2f}" if _is_number(v) else "—"
+
+
+def fmt_pct(v):
+    """An already-computed percentage (e.g. 41.3) -> '41.3%'."""
+    return f"{v:.1f}%" if _is_number(v) else "—"
+
+
+def share_pct(part, whole):
+    """part / whole as '12.3%'; '—' when either is unknown or whole is 0."""
+    if not _is_count(part) or not _is_count(whole) or whole <= 0:
+        return "—"
+    return f"{part / whole * 100:.1f}%"
+
+
 def _brand(snap, b):
     return _dict(_dict(_dict(snap).get("brands")).get(b))
 
@@ -828,71 +855,64 @@ def _total(snap):
     return _dict(_dict(snap).get("total"))
 
 
+def _kpi_note(snap, key):
+    notes = _dict(_dict(_dict(snap).get("notes")).get(key))
+    parts = [f"{b}: {notes[b]}" for b in OVERVIEW_BRANDS if isinstance(notes.get(b), str)]
+    return " · ".join(parts) or None
+
+
 def kpi_cards(snap):
-    """Four KPI cards: total value plus the M&S / H&M / Other split."""
+    """Four KPI cards: the total, the M&S / H&M / Other split and the share
+    of total SKUs."""
+    total_skus = _total(snap).get("offers")
     cards = []
-    for key, title, note in KPI_SPEC:
+    for key, title in KPI_SPEC:
+        value = _total(snap).get(key)
         split = [(b, fmt_num(_brand(snap, b).get(key))) for b in OVERVIEW_BRANDS]
-        cards.append({"key": key, "title": title, "value": fmt_num(_total(snap).get(key)),
+        share = share_pct(value, total_skus)
+        cards.append({"key": key, "title": title, "value": fmt_num(value),
                       "split": split, "sub": " · ".join(f"{b} {v}" for b, v in split),
-                      "note": note})
+                      "share": share, "share_text": f"{share} of total SKUs",
+                      "note": _kpi_note(snap, key)})
     return cards
 
 
-BRAND_TABLE_COLUMNS = (("brand", "Brand", 70), ("offers", "Offers", 80), ("for_sale", "For sale", 80),
-                       ("products", "Products", 80), ("articles", "Articles", 80),
-                       ("unparsed", "Unparsed", 80), ("sizes_count", "Sizes", 60))
-
-
-def _sizes_count(sizes):
-    return len(sizes) if isinstance(sizes, dict) else None
+BRAND_TABLE_COLUMNS = (("brand", "Brand", 90), ("skus", "SKUs", 90), ("for_sale", "For sale", 90))
 
 
 def brand_rows(snap):
     rows = []
     for name, d in [(b, _brand(snap, b)) for b in OVERVIEW_BRANDS] + [("Total", _total(snap))]:
-        rows.append({"brand": name, "offers": d.get("offers"), "for_sale": d.get("for_sale"),
-                     "products": d.get("products"), "articles": d.get("articles"),
-                     "unparsed": d.get("unparsed"), "sizes_count": _sizes_count(d.get("sizes"))})
+        skus, for_sale = d.get("offers"), d.get("for_sale")
+        rows.append({"brand": name, "skus": skus if _is_count(skus) else None,
+                     "for_sale": for_sale if _is_count(for_sale) else None})
     return rows
 
 
+WAREHOUSE_TABLE_COLUMNS = (("warehouse", "Warehouse", 120), ("skus", "Live SKUs", 80),
+                           ("avg", "Avg price", 80), ("min", "Min price", 80), ("max", "Max price", 80))
+
+
 def warehouse_rows(snap):
-    """(columns, rows); rows are [label, M&S, H&M, Other, Total]. Fixed labels
-    first, then any 'Other <id>' labels sorted. [] when unknown."""
-    columns = ["Warehouse"] + list(OVERVIEW_BRANDS) + ["Total"]
-    wh = _dict(snap).get("offers_by_warehouse")
+    """(columns, rows); rows are [label, live SKUs, avg, min, max], already
+    formatted (USD prices, '—' when null). Fixed labels first (when present),
+    then the other labels sorted. [] when unknown."""
+    columns = [c[1] for c in WAREHOUSE_TABLE_COLUMNS]
+    wh = _dict(snap).get("warehouses")
     if not isinstance(wh, dict):
         return columns, []
-    total = _dict(wh.get("total"))
-    by_brand = _dict(wh.get("by_brand"))
-    seen = set(total)
-    for b in OVERVIEW_BRANDS:
-        seen |= set(_dict(by_brand.get(b)))
-    extra = sorted(str(k) for k in seen if k not in WAREHOUSE_FIXED)
+    labels = [k for k in WAREHOUSE_FIXED if k in wh]
+    labels += sorted(str(k) for k in wh if k not in WAREHOUSE_FIXED)
     rows = []
-    for label in list(WAREHOUSE_FIXED) + extra:
-        vals = []
-        for b in OVERVIEW_BRANDS:
-            v = _dict(by_brand.get(b)).get(label, 0)
-            vals.append(v if _is_count(v) else 0)
-        t = total.get(label, 0)
-        rows.append([label] + vals + [t if _is_count(t) else 0])
+    for label in labels:
+        d = _dict(wh.get(label))
+        rows.append([label, fmt_num(d.get("skus")), fmt_usd(d.get("avg_price")),
+                     fmt_usd(d.get("min_price")), fmt_usd(d.get("max_price"))])
     return columns, rows
 
 
 def warehouse_note(snap):
-    return None if isinstance(_dict(snap).get("offers_by_warehouse"), dict) else WAREHOUSE_UNKNOWN_NOTE
-
-
-def size_rows(sizes, top_n=SIZES_TOP_N, show_all=False):
-    """([(size, count)] by count desc then size asc, hidden_count)."""
-    if not isinstance(sizes, dict):
-        return [], 0
-    rows = sorted(((str(k), v) for k, v in sizes.items() if _is_count(v)), key=lambda r: (-r[1], r[0]))
-    if show_all or len(rows) <= top_n:
-        return rows, 0
-    return rows[:top_n], len(rows) - top_n
+    return None if isinstance(_dict(snap).get("warehouses"), dict) else WAREHOUSE_UNKNOWN_NOTE
 
 
 def parse_iso(s):
@@ -933,25 +953,95 @@ def data_as_of(snap, now):
     return text, None
 
 
-def freshness_rows(catalog_status, now):
-    """(rows, line, stale): rows are (brand, live, price_fresh, stock_fresh)
-    for brands with a live count; line describes catalog_status.json's age."""
-    if not isinstance(catalog_status, dict):
-        return [], CATALOG_MISSING_NOTE, True
-    brands = _dict(catalog_status.get("brands"))
-    rows = []
-    for b in OVERVIEW_BRANDS:
-        d = _dict(brands.get(b))
-        if _is_count(d.get("live")):
-            rows.append((b, fmt_num(d.get("live")), fmt_num(d.get("price_fresh")), fmt_num(d.get("stock_fresh"))))
-    fh = catalog_status.get("fresh_hours")
-    fh = fh if _is_count(fh) and fh > 0 else SNAPSHOT_STALE_HOURS
-    built = catalog_status.get("built")
-    stale = is_stale(built, now)
-    line = f"catalog_status built {fmt_when(built)} · fresh = pushed OK in the last {fh}h"
-    if stale:
-        line += f" (stale: older than {SNAPSHOT_STALE_HOURS}h)"
-    return rows, line, stale
+def metrics_status(snap, now):
+    """(text, color_key, stale) for overview_metrics' age (metrics_built_at).
+    Null / unparsable -> NO_METRICS_TEXT, not stale. Older than
+    SNAPSHOT_STALE_HOURS -> 'warning', stale."""
+    built = _dict(snap).get("metrics_built_at")
+    if parse_iso(built) is None:
+        return NO_METRICS_TEXT, None, False
+    text = f"report of {fmt_when(built)}"
+    if is_stale(built, now if isinstance(now, datetime) else datetime.now()):
+        return text + f" (stale: older than {SNAPSHOT_STALE_HOURS}h)", "warning", True
+    return text, None, False
+
+
+def _metrics_card(title, snap, now, key, empty_text):
+    """(card, block | None). block is None when there's nothing to list."""
+    status, color, stale = metrics_status(snap, now)
+    card = {"title": title, "caption": None, "status": status, "status_color": color,
+            "stale": stale, "message": None, "lines": []}
+    if status == NO_METRICS_TEXT:
+        card["status"], card["message"] = None, NO_METRICS_TEXT
+        return card, None
+    block = _dict(snap).get(key)
+    if not isinstance(block, dict):
+        card["message"] = empty_text
+        return card, None
+    return card, block
+
+
+def _empty_card(title, caption=None):
+    return {"title": title, "caption": caption, "status": None, "status_color": None,
+            "stale": False, "message": NO_METRICS_TEXT, "lines": []}
+
+
+def campaign_card(snap, now=None):
+    """Campaigns card: live SKUs in campaigns, avg / min cost/sale %."""
+    try:
+        card, c = _metrics_card(CAMPAIGNS_TITLE, snap, now, "campaigns",
+                                "No campaign data in the last daily report")
+        if c is None:
+            return card
+        card["lines"] = [("Live SKUs in campaigns", fmt_num(c.get("live_skus"))),
+                         ("Avg cost/sale", fmt_pct(c.get("avg_ratio_pct"))),
+                         ("Min cost/sale", fmt_pct(c.get("min_ratio_pct")))]
+        n = c.get("ratio_count")
+        if _is_count(n):
+            card["caption"] = f"cost/sale over {n:,} SKUs with an M&S cost"
+        return card
+    except Exception:
+        return _empty_card(CAMPAIGNS_TITLE)
+
+
+def sales_card(snap, now=None):
+    """'Sales last 34 hours' card: revenue, orders, SKUs (units), avg
+    cost/sale, small / regular %, brand sale %, top sold category."""
+    try:
+        card, s = _metrics_card(SALES_TITLE, snap, now, "sales",
+                                "No sales data in the last daily report")
+        win = s if isinstance(s, dict) else {}
+        card["caption"] = (f"updated daily 10:00 · {fmt_when(win.get('window_from'))}"
+                           f" → {fmt_when(win.get('window_to'))}")
+        if not card["stale"]:
+            card["status"] = None  # the caption already dates it; only a stale age is shown
+        if s is None:
+            return card
+        units = s.get("units")
+        skus_text = fmt_num(s.get("skus")) + (f" ({units:,} units)" if _is_count(units) else "")
+        wh = _dict(s.get("warehouse_pct"))
+        wh_text = f"{fmt_pct(wh.get('small'))} / {fmt_pct(wh.get('regular'))}"
+        unknown = wh.get("unknown")
+        if _is_number(unknown) and unknown > 0:
+            wh_text += f" (unknown {fmt_pct(unknown)})"
+        bp = _dict(s.get("brand_pct"))
+        brand_text = " · ".join(f"{b} {fmt_pct(bp.get(b))}" for b in OVERVIEW_BRANDS)
+        top = s.get("top_category")
+        top_text = "—"
+        if isinstance(top, dict) and isinstance(top.get("label"), str) and top["label"]:
+            top_text = top["label"]
+            if _is_count(top.get("units")):
+                top_text += f" ({top['units']:,} units)"
+        card["lines"] = [("Revenue", fmt_usd(s.get("revenue_usd"))),
+                         ("Orders", fmt_num(s.get("orders"))),
+                         ("SKUs", skus_text),
+                         ("Avg cost/sale", fmt_pct(s.get("avg_ms_cost_pct"))),
+                         ("Small / regular", wh_text),
+                         ("Brand sale %", brand_text),
+                         ("Top sold category", top_text)]
+        return card
+    except Exception:
+        return _empty_card(SALES_TITLE, "updated daily 10:00 · — → —")
 
 
 def sources_warnings(snap):
@@ -1165,16 +1255,15 @@ build_daily_tasks_tab = DailyTasksTab  # backward-compatible name
 
 
 class OverviewTab(_WidgetHelpers):
-    """Account status from account_snapshot.json (+ catalog_status.json freshness)."""
+    """Account status from account_snapshot.json (snapshot v2)."""
 
     def __init__(self, app, parent):
         self.app = app
         self.tk, self.ttk = app.tk, app.ttk
         self.dpi = app.dpi
         tk = self.tk
-        self.show_all_sizes = False
         self.busy = False
-        self.snap, self.state, self.catalog = None, "missing", None
+        self.snap, self.state = None, "missing"
         self.status_var = tk.StringVar(value="Loaded cached snapshot.")
 
         outer = tk.Frame(parent, bg=BG)
@@ -1200,10 +1289,8 @@ class OverviewTab(_WidgetHelpers):
 
     # ---------- data ----------
     def load_local(self):
-        """Re-reads the local snapshot + catalog_status.json and redraws."""
+        """Re-reads the local snapshot and redraws."""
         self.snap, self.state = load_snapshot(HERE / ACCOUNT_SNAPSHOT_FILE)
-        cat = load_json(HERE / CATALOG_STATUS_FILE, None)
-        self.catalog = cat if isinstance(cat, dict) else None
         self.render()
 
     # ---------- drawing ----------
@@ -1226,7 +1313,7 @@ class OverviewTab(_WidgetHelpers):
         return f
 
     def render(self):
-        """Tears the body down and rebuilds it from self.snap / self.catalog."""
+        """Tears the body down and rebuilds it from self.snap."""
         for w in self.body.winfo_children():
             w.destroy()
         now = datetime.now()
@@ -1239,21 +1326,21 @@ class OverviewTab(_WidgetHelpers):
         grid = self.tk.Frame(self.body, bg=BG)
         grid.pack(fill="both", expand=True)
         grid.columnconfigure(0, weight=3)
-        grid.columnconfigure(1, weight=1)
+        grid.columnconfigure(1, weight=2)
 
         if self.state != "ok":
             self.label(grid, snapshot_placeholder(self.state), 11, STATUS["warning"]).grid(
                 row=0, column=0, columnspan=2, sticky="w", pady=(10, 0))
-        else:
-            warn = sources_warnings(self.snap)
-            if warn:
-                self.label(grid, "Sources not ok: " + ", ".join(warn), 9, STATUS["warning"]).grid(
-                    row=0, column=0, columnspan=2, sticky="w", pady=(6, 0))
-            self._render_cards(grid)
-            self._render_brands(grid)
-            self._render_warehouses(grid)
-            self._render_sizes(grid)
-        self._render_freshness(grid, now)
+            return
+        warn = sources_warnings(self.snap)
+        if warn:
+            self.label(grid, "Sources not ok: " + ", ".join(warn), 9, STATUS["warning"]).grid(
+                row=0, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self._render_cards(grid)
+        self._render_brands(grid)
+        self._render_warehouses(grid)
+        self._render_metrics_card(grid, campaign_card(self.snap, now), 2)
+        self._render_metrics_card(grid, sales_card(self.snap, now), 3)
 
     def _render_cards(self, grid):
         cards = self.tk.Frame(grid, bg=BG)
@@ -1264,69 +1351,49 @@ class OverviewTab(_WidgetHelpers):
             cards.columnconfigure(i, weight=1, uniform="k")
             self.label(f, c["title"], 8, MUTED).pack(anchor="w")
             self.label(f, c["value"], 15, FG, True).pack(anchor="w")
-            self.label(f, c["sub"], 8, MUTED, wraplength=self.px(240)).pack(anchor="w")
+            self.label(f, c["sub"], 8, MUTED, wraplength=self.px(300)).pack(anchor="w")
+            self.label(f, c["share_text"], 8, MUTED).pack(anchor="w")
             if c["note"]:
-                self.label(f, c["note"], 7, DIM).pack(anchor="w")
+                self.label(f, c["note"], 7, DIM, wraplength=self.px(300)).pack(anchor="w")
 
     def _render_brands(self, grid):
         f = self._section(grid, "Brands", 2, 0)
         tree = self._tree(f, BRAND_TABLE_COLUMNS, 4)
         for row in brand_rows(self.snap):
-            tree.insert("", "end", values=[row["brand"]] + [fmt_num(row[k]) for k, _, _ in BRAND_TABLE_COLUMNS[1:]],
+            tree.insert("", "end", values=[row["brand"], fmt_num(row["skus"]), fmt_num(row["for_sale"])],
                         tags=("total",) if row["brand"] == "Total" else ())
 
     def _render_warehouses(self, grid):
-        f = self._section(grid, "Offers by warehouse", 3, 0)
-        columns, rows = warehouse_rows(self.snap)
+        f = self._section(grid, "Warehouses (prices in USD)", 3, 0)
         note = warehouse_note(self.snap)
         if note:
             self.label(f, note, 9, STATUS["warning"]).pack(anchor="w")
             return
-        tree = self._tree(f, [(f"c{i}", name, 110 if i == 0 else 70) for i, name in enumerate(columns)],
-                          max(3, min(len(rows), 6)))
+        _, rows = warehouse_rows(self.snap)
+        tree = self._tree(f, WAREHOUSE_TABLE_COLUMNS, max(3, min(len(rows), 6)))
         for r in rows:
-            tree.insert("", "end", values=[r[0]] + [fmt_num(v) for v in r[1:]])
+            tree.insert("", "end", values=r)
 
-    def _render_sizes(self, grid):
-        f = self._section(grid, "Sizes (all brands)", 2, 1, rowspan=3)
-        rows, hidden = size_rows(_total(self.snap).get("sizes"), show_all=self.show_all_sizes)
-        if not rows:
-            self.label(f, "No size data (canonical MS- ids only).", 9, MUTED).pack(anchor="w")
-            return
-        if hidden or self.show_all_sizes:
-            text = f"Show all ({hidden} more)" if hidden else f"Show top {SIZES_TOP_N}"
-            self.button(f, text, self.on_toggle_sizes).pack(side="bottom", anchor="w", pady=(4, 0))
-        wrap = self.tk.Frame(f, bg=CARD)
-        wrap.pack(fill="both", expand=True)
-        tree = self.ttk.Treeview(wrap, columns=["size", "count"], show="headings", selectmode="none",
-                                 height=min(len(rows), SIZES_TOP_N))
-        tree.heading("size", text="Size")
-        tree.heading("count", text="Offers")
-        tree.column("size", width=self.px(90), anchor="w", stretch=True)
-        tree.column("count", width=self.px(70), anchor="e", stretch=True)
-        sb = self.ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=sb.set)
-        tree.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
-        for size, n in rows:
-            tree.insert("", "end", values=[size, fmt_num(n)])
-
-    def _render_freshness(self, grid, now):
-        f = self._section(grid, "Catalog freshness (catalog_status.json)", 4, 0)
-        rows, line, stale = freshness_rows(self.catalog, now)
-        self.label(f, line, 8, STATUS["warning"] if stale else MUTED).pack(anchor="w")
-        if rows:
-            tree = self._tree(f, [("brand", "Brand", 70), ("live", "Live", 80),
-                                  ("price_fresh", "Price fresh", 90), ("stock_fresh", "Stock fresh", 90)],
-                              len(rows))
-            for r in rows:
-                tree.insert("", "end", values=list(r))
+    def _render_metrics_card(self, grid, card, row):
+        f = self._section(grid, card["title"], row, 1)
+        if card["caption"]:
+            self.label(f, card["caption"], 8, MUTED, wraplength=self.px(320)).pack(anchor="w")
+        if card["status"]:
+            color = card["status_color"]
+            self.label(f, card["status"], 8, STATUS[color] if color else MUTED,
+                       wraplength=self.px(320)).pack(anchor="w")
+        if card["message"]:
+            self.label(f, card["message"], 9, MUTED, wraplength=self.px(320)).pack(anchor="w", pady=(4, 0))
+        if card["lines"]:
+            table = self.tk.Frame(f, bg=CARD)
+            table.pack(fill="x", pady=(4, 0))
+            table.columnconfigure(1, weight=1)
+            for i, (name, value) in enumerate(card["lines"]):
+                self.label(table, name, 9, MUTED).grid(row=i, column=0, sticky="w")
+                self.label(table, value, 9, FG, True, anchor="e",
+                           wraplength=self.px(300)).grid(row=i, column=1, sticky="e", padx=(10, 0))
 
     # ---------- actions (the subprocess runs in a thread) ----------
-    def on_toggle_sizes(self):
-        self.show_all_sizes = not self.show_all_sizes
-        self.render()
-
     def on_refresh(self):
         if self.busy:
             return
