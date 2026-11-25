@@ -42,8 +42,8 @@ Row definitions (all confirmed with the business, 2026-09-02):
                                         their known USD price), ruling out
                                         a single fixed-rate currency
                                         conversion. Sales data is instead
-                                        built from /v3/posting/fbs/list +
-                                        /v2/posting/fbo/list with
+                                        built from /v4/posting/fbs/list +
+                                        /v3/posting/fbo/list with
                                         with.financial_data=True, reading
                                         the TOP-LEVEL products[].price /
                                         currency_code (confirmed USD, and
@@ -312,44 +312,46 @@ def get_catalog_margin_flagged_count():
         return None
 
 
-def fetch_fbs_postings(date_from, date_to):
-    postings = []
-    offset = 0
+def _normalize_posting(p):
+    """The new posting lists give products[].price as {"amount": "158.04", "currency": "USD"}
+    instead of price "158.04" + currency_code "USD". Rewrite to the old shape, which the
+    sales code below reads (left as-is if it's already the old shape)."""
+    for item in p.get("products") or []:
+        price = item.get("price")
+        if isinstance(price, dict):
+            item["price"] = price.get("amount")
+            if not item.get("currency_code"):
+                item["currency_code"] = price.get("currency")
+    return p
+
+
+def _cursor_postings(endpoint, date_from, date_to):
+    """Cursor-paged posting list (/v4/posting/fbs/list, /v3/posting/fbo/list). The old
+    offset-paged /v3/posting/fbs/list (404) and /v2/posting/fbo/list ("obsolete method")
+    are retired (seen 2026-11-23/25). New endpoints answer with top-level
+    postings / cursor / has_next; a "result" wrapper is accepted too."""
+    out, cursor = [], ""
     while True:
-        result = call("/v3/posting/fbs/list", {
-            "filter": {
-                "since": date_from.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "to": date_to.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            },
-            "limit": 1000, "offset": offset,
-            "with": {"financial_data": False},
-        })
-        batch = result.get("result", {}).get("postings", [])
-        postings.extend(batch)
-        if len(batch) < 1000:
-            break
-        offset += 1000
-    return postings
+        payload = {"dir": "ASC",
+                   "filter": {"since": date_from.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                              "to": date_to.strftime("%Y-%m-%dT%H:%M:%SZ")},
+                   "limit": 100, "with": {"financial_data": False}}
+        if cursor:
+            payload["cursor"] = cursor
+        r = call(endpoint, payload)
+        res = r["result"] if isinstance(r.get("result"), dict) else r
+        out.extend(_normalize_posting(p) for p in res.get("postings", []))
+        cursor = res.get("cursor") or ""
+        if not res.get("has_next") or not cursor:
+            return out
+
+
+def fetch_fbs_postings(date_from, date_to):
+    return _cursor_postings("/v4/posting/fbs/list", date_from, date_to)
 
 
 def fetch_fbo_postings(date_from, date_to):
-    postings = []
-    offset = 0
-    while True:
-        result = call("/v2/posting/fbo/list", {
-            "filter": {
-                "since": date_from.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "to": date_to.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            },
-            "limit": 1000, "offset": offset,
-            "with": {"financial_data": False},
-        })
-        batch = result.get("result", [])
-        postings.extend(batch)
-        if len(batch) < 1000:
-            break
-        offset += 1000
-    return postings
+    return _cursor_postings("/v3/posting/fbo/list", date_from, date_to)
 
 
 def get_sales_window(date_from, date_to):
