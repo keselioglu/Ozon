@@ -1930,6 +1930,7 @@ class PrioritizationTab(_WidgetHelpers):
                 ent.configure(validate="key", validatecommand=self._np_vcmd)
                 ent.bind("<Return>", lambda e, b=brand, c=cat: self.on_np_urls_commit(b, c))
                 ent.bind("<FocusOut>", lambda e, b=brand, c=cat: self.on_np_urls_commit(b, c))
+                ent.bind("<KeyRelease>", lambda e, b=brand, c=cat: self.on_np_urls_live(b, c))
                 ent.bind("<Escape>", lambda e, b=brand, c=cat: self._np_revert(b, c, None))
                 self.np_vars[(brand, cat)] = (uvar, ent, row.get("eligible_urls") or 0)
                 self._np_color(brand, cat)
@@ -1993,19 +1994,39 @@ class PrioritizationTab(_WidgetHelpers):
         self._np_color(brand, cat)
         self.render_np_state()
 
-    def on_np_urls_commit(self, brand, cat):
+    def on_np_urls_live(self, brand, cat):
+        """While typing: apply a parseable value at once, so the warning colour
+        and the unsaved-changes note are live. Never reverts mid-typing (an
+        empty or invalid value is left for the commit to revert)."""
         item = self.np_vars.get((brand, cat))
         if not item:
             return
+        try:
+            n = parse_urls_to_add(item[0].get())
+            if n != new_product_plan.get_entry(self.np_plan, brand, cat)["urls_to_add"]:
+                self.np_plan = new_product_plan.set_entry(self.np_plan, brand, cat, urls_to_add=n)
+        except ValueError:
+            pass
+        self._np_color(brand, cat)
+        self.render_np_state()
+
+    def on_np_urls_commit(self, brand, cat):
+        """Commits the entry's text. Returns False if it was invalid and reverted."""
+        item = self.np_vars.get((brand, cat))
+        if not item:
+            return True
         text = item[0].get()
         try:
             n = parse_urls_to_add(text)
         except ValueError as err:
             self._np_revert(brand, cat, f"{brand} {cat}: {err}; reverted.")
-            return
+            return False
         if n != new_product_plan.get_entry(self.np_plan, brand, cat)["urls_to_add"]:
             self._np_set_urls(brand, cat, n)
+            if new_product_plan.get_entry(self.np_plan, brand, cat)["urls_to_add"] != n:
+                return False  # _np_set_urls refused and reverted
         item[0].set(str(n))  # normalises e.g. '007' -> '7'
+        return True
 
     def on_np_fill(self, brand, cat, mode):
         row = next((r for r in self.np_rows if r["brand"] == brand and r["category"] == cat), None)
@@ -2017,6 +2038,15 @@ class PrioritizationTab(_WidgetHelpers):
         self._np_set_urls(brand, cat, n)
 
     def on_np_save(self):
+        # tk.Button never takes focus, so a typed value may not be committed yet
+        ok = True
+        for brand, cat in list(self.np_vars):
+            if not self.on_np_urls_commit(brand, cat):
+                ok = False
+        if not ok:
+            self.render_np_state()
+            self.status_var.set("Not saved: an invalid 'URLs to add' value was reverted; check and save again.")
+            return
         try:
             saved = new_product_plan.save_plan(self.np_plan, str(HERE / NP_PLAN_FILE))
         except (ValueError, OSError) as err:

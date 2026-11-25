@@ -440,3 +440,69 @@ def test_np_rows_sort_and_add_buttons():
     assert (pj["total_urls"], pj["eligible_urls"]) == (17, 7)
     assert npp.add_all(pj) == 7 and npp.add_half(pj) == 3
     assert ui.np_fmt(rows[-1]["eligible_urls"]) == "—"
+
+
+class _Var:
+    def __init__(self, value=""):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def set(self, value):
+        self.value = value
+
+
+class _Widget:
+    def __init__(self):
+        self.opts = {}
+
+    def configure(self, **kw):
+        self.opts.update(kw)
+
+
+def _fake_np_tab(monkeypatch, tmp_path, eligible=7):
+    import new_product_plan as npp
+    monkeypatch.setattr(ui, "HERE", tmp_path)
+    tab = ui.PrioritizationTab.__new__(ui.PrioritizationTab)
+    tab.np_plan = npp.default_plan()
+    tab.np_saved = npp.default_plan()
+    tab.np_save_btn = _Widget()
+    tab.np_note = _Widget()
+    tab.status_var = _Var()
+    var = _Var("0")
+    ent = _Widget()
+    tab.np_vars = {("M&S", "Pajama"): (var, ent, eligible)}
+    return tab, var, ent
+
+
+def test_np_save_commits_typed_but_uncommitted_value(monkeypatch, tmp_path):
+    import json
+    tab, var, _ent = _fake_np_tab(monkeypatch, tmp_path)
+    var.set("50")  # typed, no <Return>/<FocusOut> (tk.Button never takes focus)
+    tab.on_np_save()
+    data = json.loads((tmp_path / ui.NP_PLAN_FILE).read_text(encoding="utf-8"))
+    assert data["categories"]["M&S/Pajama"]["urls_to_add"] == 50
+    assert tab.np_note.opts["text"] == ""
+
+
+def test_np_save_aborts_when_pending_value_is_invalid(monkeypatch, tmp_path):
+    tab, var, _ent = _fake_np_tab(monkeypatch, tmp_path)
+    var.set("")  # emptied, never committed
+    tab.on_np_save()
+    assert not (tmp_path / ui.NP_PLAN_FILE).exists()
+    assert var.get() == "0"  # reverted
+    assert tab.status_var.get().startswith("Not saved")
+
+
+def test_np_live_typing_updates_note_and_warning(monkeypatch, tmp_path):
+    tab, var, ent = _fake_np_tab(monkeypatch, tmp_path, eligible=7)
+    var.set("9")
+    tab.on_np_urls_live("M&S", "Pajama")
+    assert tab.np_note.opts["text"] == "Unsaved changes."
+    assert ent.opts["fg"] == ui.STATUS["warning"]
+    var.set("")  # mid-typing: not reverted, plan keeps the last parseable value
+    tab.on_np_urls_live("M&S", "Pajama")
+    assert var.get() == ""
+    import new_product_plan as npp
+    assert npp.get_entry(tab.np_plan, "M&S", "Pajama")["urls_to_add"] == 9
