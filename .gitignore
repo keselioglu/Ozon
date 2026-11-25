@@ -35,6 +35,8 @@ __pycache__/
 _temp_*
 sample_page*.html
 daily_plan.json
+new_product_plan.json
+.new_product_plan_*.tmp
 category_inventory.json
 category_inventory.refreshing
 .category_inventory_*.tmp
