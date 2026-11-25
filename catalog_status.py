@@ -11,6 +11,14 @@ Per brand (M&S, H&M, other):
 
 The "fresh" numbers come from the run summaries (price_update_history.jsonl,
 stock_update_history.jsonl, hm_stock_update_history.jsonl), capped at the live count.
+
+Also writes catalog_live_offer_ids.json ({"built", "count", "offer_ids"}) and
+catalog_live_prices.json ({"built", "count", "prices": {offer_id: float USD}}): each
+live offer's current final price (Ozon price.price, read-only /v5/product/info/prices
+via warehouse_routing.fetch_final_prices, the same value warehouse routing uses).
+Offers whose price is missing, None or <= 0 are left out (never guessed). If the
+price fetch fails, a warning is printed and the price file is left untouched; the
+other two files are still written. Both id/price files are written atomically.
 Pushes nothing.
 """
 import json
@@ -25,10 +33,11 @@ if sys.platform == "win32":
 
 from ozon_client import call
 from margin_pricing import get_real_stock
-from warehouse_routing import MS_FAMILY_PREFIXES
+from warehouse_routing import MS_FAMILY_PREFIXES, fetch_final_prices
 
 OUT = Path(__file__).with_name("catalog_status.json")
 LIVE_IDS_OUT = Path(__file__).with_name("catalog_live_offer_ids.json")
+LIVE_PRICES_OUT = Path(__file__).with_name("catalog_live_prices.json")
 HM_RE = re.compile(r"^(HM\d?-|\d-HM-)")
 FRESH_HOURS = 26
 URL_DAYS = 3
@@ -60,6 +69,33 @@ def write_live_ids(path, ids, built):
     temp file in the same dir, then os.replace, so readers never see a half-written file."""
     path = Path(path)
     data = {"built": built, "count": len(ids), "offer_ids": sorted(ids)}
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def valid_prices(prices):
+    """offer_id -> float USD, keeping only real prices > 0 (None / 0 / negative /
+    NaN / non-numeric are dropped, never guessed)."""
+    out = {}
+    for oid, p in (prices or {}).items():
+        try:
+            v = float(p)
+        except (TypeError, ValueError):
+            continue
+        if v == v and v > 0:
+            out[oid] = v
+    return out
+
+
+def write_live_prices(path, prices, built):
+    """Atomically write {"built", "count", "prices"} to path (temp file + os.replace)."""
+    path = Path(path)
+    data = {"built": built, "count": len(prices), "prices": dict(sorted(prices.items()))}
     tmp = path.with_name(path.name + ".tmp")
     try:
         tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -127,6 +163,12 @@ def working_url_offer_ids():
 def main():
     ids = live_offer_ids()
     stock = get_real_stock(ids) or {}
+    try:
+        live_ids = set(ids)
+        prices = {o: p for o, p in valid_prices(fetch_final_prices(ids) if ids else {}).items() if o in live_ids}
+    except Exception as e:  # price file is optional; never lose catalog_status.json over it
+        print(f"WARNING: live price fetch failed, {LIVE_PRICES_OUT.name} not updated: {e}")
+        prices = None
     url_ok = working_url_offer_ids()
     b = {k: {"live": 0, "url_ok": 0, "for_sale": 0, "price_fresh": 0, "stock_fresh": 0} for k in ("M&S", "H&M", "Other")}
     for o in ids:
@@ -153,6 +195,8 @@ def main():
            "runs": {k: {"when": w, "ok": n, "fresh": is_fresh(w)} for k, (w, n) in runs.items()}}
     OUT.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
     write_live_ids(LIVE_IDS_OUT, ids, built)
+    if prices is not None:
+        write_live_prices(LIVE_PRICES_OUT, prices, built)
     print(json.dumps(out, ensure_ascii=False))
     return 0
 
