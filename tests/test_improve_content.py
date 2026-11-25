@@ -252,6 +252,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(cm, "build_rich_content", lambda a, t, u: '{"content": []}')
     monkeypatch.setattr(cm, "size_table_for", lambda name, url=None: '{"table": 1}')
     monkeypatch.setattr(cm, "cleanup_group_media", lambda a, c, d, p: calls["cleanup"].append((a, c, d, p)))
+    monkeypatch.setattr(ic, "media_host_usable", lambda: True)  # tests don't depend on the .env host
+    monkeypatch.setattr(ic, "r2_object_missing", lambda url: False)
 
     def no_delete(keys):
         calls["delete_r2"] += 1
@@ -293,10 +295,16 @@ def test_run_pushes_merged_item_per_offer_and_cleans_up(env, monkeypatch, capsys
     assert env["calls"]["crops"] == 2 and env["calls"]["video"] == 2
     assert stats["groups"] == 2 and stats["offers"] == 3 and stats["failed"] == 0
     assert stats["photos"] == 3 and stats["attrs"] == 2
-    # verified groups -> local + R2 copies deleted, for photos and videos
+    # verified groups keep their media (Ozon fetches later); deleted MEDIA_KEEP_DAYS later
+    assert env["calls"]["cleanup"] == []
+    later = TODAY + __import__("datetime").timedelta(days=ic.MEDIA_KEEP_DAYS)
+    ic.cleanup_old_media(_log(env["log"]), later, env["log"])
     dirs = sorted((a, d) for a, c, d, p in env["calls"]["cleanup"])
     assert dirs == [("T1", "generated_photos"), ("T1", "generated_videos"),
                     ("T2", "generated_photos"), ("T2", "generated_videos")]
+    env["calls"]["cleanup"].clear()
+    ic.cleanup_old_media(_log(env["log"]), later, env["log"])  # cleaned once only
+    assert env["calls"]["cleanup"] == []
     log = _log(env["log"])
     offers = [e for e in log if e["type"] == "offer"]
     assert {e["offer_id"] for e in offers} == set(api.records)
@@ -305,8 +313,9 @@ def test_run_pushes_merged_item_per_offer_and_cleans_up(env, monkeypatch, capsys
     assert first["actions"] == ["photos", "video", "rich", "size_table", "attrs"]
     assert [e["status"] for e in log if e["type"] == "group"] == ["verified", "verified"]
     out = capsys.readouterr().out.strip().splitlines()
-    assert out[-1].startswith("Done. 2 groups / 3 offers improved (photos 3, videos 3, rich 3, "
-                              "size-table 3, attrs 2), 0 failed")
+    done = [ln for ln in out if ln.startswith("Done.")]
+    assert done[-1].startswith("Done. 2 groups / 3 offers improved (photos 3, videos 3, rich 3, "
+                               "size-table 3, attrs 2), 0 failed")
 
     # re-run the same day: both groups are in cooldown -> no pushes
     env["calls"]["push"].clear()
@@ -322,7 +331,10 @@ def test_failed_verify_keeps_files_and_marks_retry(env, monkeypatch):
     # T1 stopped at its first failure; T2 still went through
     assert [p["offer_id"] for p in env["calls"]["push"]] == ["MS-T1-BLACK-40", "MS-T2-RED-40"]
     assert stats["failed"] == 1 and stats["groups"] == 1
-    assert {a for a, *_ in env["calls"]["cleanup"]} == {"T2"}   # T1 files kept
+    assert env["calls"]["cleanup"] == []   # nothing deleted on the push day
+    later = TODAY + __import__("datetime").timedelta(days=ic.MEDIA_KEEP_DAYS)
+    ic.cleanup_old_media(_log(env["log"]), later, env["log"])
+    assert {a for a, *_ in env["calls"]["cleanup"]} == {"T2"}   # T1 (retry) files kept
     assert env["calls"]["delete_r2"] == 0
     groups = {e["group"]: e["status"] for e in _log(env["log"]) if e["type"] == "group"}
     assert groups == {"T1_BLACK": "retry", "T2_RED": "verified"}
@@ -410,3 +422,25 @@ def test_help_lists_required_flags(capsys):
     out = capsys.readouterr().out
     for flag in ("--dry-run", "--limit-groups", "--max-minutes"):
         assert flag in out
+
+
+def test_photo_target_takes_highest_unmet_tier():
+    rec = {"groups": [{"key": "media", "unmet_conditions": [
+        {"key": "media_images_1_2", "description": "Добавлено от 1 до 2 изображений"},
+        {"key": "media_images_5_7", "description": "Добавлено от 5 до 7 изображений"},
+        {"key": "media_images_8+", "description": "Добавлено от 8 изображений"},
+        {"key": "media_video_or_video_cover", "description": "Добавлена видео или видеообложка"}]}]}
+    assert ic.photo_target_from_conditions(rec) == 8
+    assert ic.photo_target_from_conditions({"groups": []}) is None
+
+
+def test_no_media_actions_without_usable_host_and_r2dev_links_count_as_missing():
+    rating = {"groups": [{"key": "media", "unmet_conditions": [{"key": "media_images_8+", "description": "8"}]}]}
+    record = {"images": ["a", "b"], "attributes": []}
+    off = ic.select_actions(rating, record, False, media_ok=False)
+    assert "photos" not in off and "video" not in off
+    on = ic.select_actions(rating, record, False, media_ok=True)
+    assert on["photos"] == 8 and on["video"] is True
+    assert ic.r2_object_missing("https://pub-x.r2.dev/videos/a/video.mp4") is True
+    assert ic.r2_object_missing("https://example.com/video.mp4") is False
+    assert ic.r2_object_missing(None) is False

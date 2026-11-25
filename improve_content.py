@@ -71,6 +71,7 @@ LOG_FILE = "content_improvement_log.jsonl"
 PRODUCTS_CSV = "products.csv"
 
 CONTENT_COOLDOWN_DAYS = 7
+MEDIA_KEEP_DAYS = 3  # generated photos/videos stay on R2 this long so Ozon can fetch them
 TARGET_PHOTO_COUNT = 8
 MAX_PHOTO_COUNT = 15
 DAILY_CONTENT_GROUPS = 150
@@ -182,35 +183,72 @@ def _rating(rec):
 
 def photo_target_from_conditions(rating_record, default=TARGET_PHOTO_COUNT, cap=MAX_PHOTO_COUNT):
     """Photo count to aim for if a photo-count condition is unmet, else None.
-    Uses the first number in the condition's description (or key) when
-    present -- Ozon states its threshold there -- capped at `cap`."""
+    Ozon lists photo conditions as TIERS ("1 to 2 images", "3 to 4", "5 to 7", "8+") and leaves
+    several unmet at once, so the target is the HIGHEST tier's lower bound (8+ -> 8), capped at
+    `cap`. (Taking the first unmet tier aimed at 2 and skipped 4-photo products -- 2026-11-25.)"""
+    best = None
     for g in (rating_record or {}).get("groups") or []:
         for c in g.get("unmet_conditions") or []:
             text = f"{c.get('key') or ''} {c.get('description') or ''}"
             if not _PHOTO_RE.search(text) or _VIDEO_RE.search(text):
                 continue
             target = default
-            for source in (c.get("description") or "", c.get("key") or ""):
-                nums = [int(n) for n in _INT_RE.findall(source) if int(n) >= 2]
+            for source in (c.get("key") or "", c.get("description") or ""):
+                nums = [int(n) for n in _INT_RE.findall(source) if int(n) >= 1]
                 if nums:
-                    target = nums[0]
+                    target = nums[0]  # tier's lower bound: "5_7" -> 5, "8+" -> 8
                     break
-            return max(1, min(int(target), int(cap)))
-    return None
+            best = target if best is None else max(best, target)
+    return None if best is None else max(1, min(int(best), int(cap)))
+
+
+_R2_MISSING_CACHE = {}
+
+
+def r2_object_missing(url):
+    """True if `url` is a generated-media link Ozon can't use: on Cloudflare's *.r2.dev address
+    (unreachable from Russia, 2026-11-25) or one of our storage files that no longer exists.
+    Any other URL, or the store can't be asked -> False (don't redo)."""
+    if not isinstance(url, str):
+        return False
+    if ".r2.dev/" in url:
+        return True
+    if url in _R2_MISSING_CACHE:
+        return _R2_MISSING_CACHE[url]
+    try:
+        import r2_storage
+        key = r2_storage.key_for_url(url)
+        missing = bool(key) and r2_storage.object_exists(key) is False
+    except Exception:
+        missing = False
+    _R2_MISSING_CACHE[url] = missing
+    return missing
+
+
+def media_host_usable():
+    """Generated photos/videos only help if Ozon can download them: a configured store that is
+    not on *.r2.dev (unreachable from Russia, 2026-11-25)."""
+    try:
+        import r2_storage
+        return r2_storage.is_configured() and ".r2.dev" not in (r2_storage.PUBLIC_BASE_URL or "")
+    except Exception:
+        return False
 
 
 def select_actions(rating_record, record, size_table_available, photo_default=TARGET_PHOTO_COUNT,
-                   photo_cap=MAX_PHOTO_COUNT):
+                   photo_cap=MAX_PHOTO_COUNT, media_ok=True):
     """Planned actions for one offer_id from its rating and live record:
     {"photos": target, "video": True, "rich": True, "size_table": True,
-     "attrs": [attr_id, ...]} -- only the keys that apply."""
+     "attrs": [attr_id, ...]} -- only the keys that apply. media_ok False (no host Ozon can
+    download from) -> no photo/video actions."""
     from content_attributes import improve_attribute_ids_from_rating
 
     actions = {}
     target = photo_target_from_conditions(rating_record, photo_default, photo_cap)
-    if target and len((record or {}).get("images") or []) < target:
+    if media_ok and target and len((record or {}).get("images") or []) < target:
         actions["photos"] = target
-    if not cm.attr_value(record or {}, cm.ATTR_VIDEO_LINK):
+    video = cm.attr_value(record or {}, cm.ATTR_VIDEO_LINK)
+    if media_ok and (not video or r2_object_missing(video)):
         actions["video"] = True
     if not cm.attr_value(record or {}, cm.ATTR_RICH_CONTENT):
         actions["rich"] = True
@@ -540,7 +578,7 @@ def plan_group(group, snapshot, records, photo_default=TARGET_PHOTO_COUNT, photo
         if not record:
             continue
         actions = select_actions(snapshot.get(oid), record, group.get("_size_available", False),
-                                 photo_default, photo_cap)
+                                 photo_default, photo_cap, group.get("_media_ok", True))
         if actions:
             planned.append((oid, actions))
     return planned
@@ -606,6 +644,7 @@ def process_group(group, ctx):
     notes = []
     media = GroupMedia(group, dry_run, notes)
     group["_size_available"] = bool(media.size_table())
+    group["_media_ok"] = ctx.get("media_ok", True)
     planned = plan_group(group, snapshot, records, ctx["photo_default"], ctx["photo_cap"])
 
     def log_group(status, extra=None):
@@ -691,9 +730,11 @@ def process_group(group, ctx):
         return "dry_run"
 
     if all_ok and pushed_ok:
-        media.cleanup()
+        # Ozon downloads photos/videos from our URLs LATER, on its own schedule: deleting right
+        # after the push left Ozon nothing to fetch (2026-11-25). Files stay on R2 for
+        # MEDIA_KEEP_DAYS and are removed by cleanup_old_media() on a later run.
         stats["groups"] += 1
-        log_group("verified", {"verified_offers": pushed_ok})
+        log_group("verified", {"verified_offers": pushed_ok, "media_pending_cleanup": media.generated_any})
         return "verified"
     if all_ok:
         log_group("nothing_to_do")
@@ -713,6 +754,39 @@ def _count(stats, applied):
 # Main
 # ---------------------------------------------------------------------------
 
+def media_due_for_cleanup(log_entries, today, keep_days=MEDIA_KEEP_DAYS):
+    """[(group, article, color)] whose generated media were pushed >= keep_days ago and not yet
+    cleaned up (a later 'cleanup' log entry for the group, or a newer push, resets it)."""
+    pending, done = {}, set()
+    for e in log_entries:
+        if e.get("type") == "group" and e.get("media_pending_cleanup"):
+            pending[e["group"]] = e
+        elif e.get("type") == "cleanup":
+            done.add((e.get("group"), e.get("pushed_date")))
+    due = []
+    for g, e in pending.items():
+        try:
+            d = date.fromisoformat(e.get("date"))
+        except (TypeError, ValueError):
+            continue
+        if (today - d).days >= keep_days and (g, e.get("date")) not in done:
+            due.append((g, e.get("article"), e.get("color"), e.get("date")))
+    return due
+
+
+def cleanup_old_media(log_entries, today, log_path, keep_days=MEDIA_KEEP_DAYS):
+    """Deletes local + R2 copies of media pushed >= keep_days ago (business instruction
+    2026-08-27: don't keep videos/crops; delayed so Ozon has fetched them first)."""
+    for g, article, color, pushed in media_due_for_cleanup(log_entries, today, keep_days):
+        try:
+            cm.cleanup_group_media(article, color, cm.PHOTOS_DIR, cm.R2_PREFIX_BY_LOCAL_DIR[cm.PHOTOS_DIR])
+            cm.cleanup_group_media(article, color, cm.VIDEOS_DIR, cm.R2_PREFIX_BY_LOCAL_DIR[cm.VIDEOS_DIR])
+            append_log({"type": "cleanup", "date": today.isoformat(), "group": g, "pushed_date": pushed}, log_path)
+            print(f"  cleaned up media of {g} (pushed {pushed})")
+        except Exception as e:
+            print(f"  ! cleanup of {g} failed: {e}")
+
+
 def run(args, api_call=None, today=None, products_rows=None):
     if api_call is None:
         from ozon_client import call as api_call
@@ -722,6 +796,8 @@ def run(args, api_call=None, today=None, products_rows=None):
 
     snapshot = ensure_snapshot(args.snapshot)
     log_entries = load_log(args.log)
+    if not args.dry_run:
+        cleanup_old_media(log_entries, today, args.log)
 
     n, before_avg, after_avg = yesterday_batch_change(log_entries, snapshot, today)
     if n:
@@ -759,7 +835,10 @@ def run(args, api_call=None, today=None, products_rows=None):
     budget = UpdateBudget(api_call, args.update_share)
     print(f"daily_update allowance for this job: {budget.start_allowed}")
 
-    ctx = {"api_call": api_call, "dry_run": args.dry_run, "snapshot": snapshot, "stats": stats,
+    media_ok = media_host_usable()
+    if not media_ok:
+        print("Photos/videos OFF: no media host Ozon can download from (set MEDIA_S3_* in .env).")
+    ctx = {"media_ok": media_ok, "api_call": api_call, "dry_run": args.dry_run, "snapshot": snapshot, "stats": stats,
            "today": today, "budget": budget, "log_path": args.log,
            "photo_default": args.photo_target, "photo_cap": MAX_PHOTO_COUNT}
 
