@@ -153,10 +153,32 @@ tkinter window with three tabs:
   scheduled task (display names: "MS stock update", "H&M stock update",
   "Price update"), each with next/last run, result and six counts from
   its latest run. View-only (see Task status below).
-- **Prioritization** (the app opens on this tab): the planner, i.e. the
-  `daily_plan.json` editor plus quota / plan / pool per brand × category
-  from `category_inventory.json`, `catalog_status.json` and the live
-  `/v4/product/info/limit` quota read.
+- **New Product Adding** (the app opens on this tab; it was called
+  "Prioritization", the class is still `PrioritizationTab`, alias
+  `NewProductAddingTab`): the quota / today's plan / deferred / brand
+  cards (live `/v4/product/info/limit` read, `catalog_status.json`), then
+  a scrollable table from `new_product_plan.build_rows()` over
+  `category_inventory.json` + `new_product_plan.json`: Brand | Sub category
+  (Ozon type label) | Priority (Very high … Very low, default Medium;
+  changing it re-sorts the rows) | Total URLs | Eligible URLs (not live:
+  crawled + found by the walk) | URLs to add (int entry, warning colour
+  above eligible, invalid input is reverted) | Add all (eligible) / Add half
+  (eligible // 2). H&M is one read-only row ("—", no add pipeline yet /
+  website check pending). **Save** writes gitignored `new_product_plan.json`
+  (`new_product_plan.save_plan()`, atomic, `{"version": 1, "categories":
+  {"M&S/Pajama": {"priority", "urls_to_add"}}, "updated_at"}`, no per-day
+  overrides; disabled while `validate_plan()` reports errors). These
+  targets are **saved only**: discovery and the upload still follow
+  `daily_plan.json` (offers) until a backlog task wires them in. **Add a new
+  website** opens a form (URL + description → Create epic) that calls
+  `new_sources.create_request()` on the UI thread (small local writes; see
+  New product sources below): a record in `new_source_requests.json` and an
+  `EPIC:` block under `## Todo` in TASKS.md, which the 4am run commits. The
+  URL is never fetched and no GitHub issue is created. Below that: the
+  `daily_plan.json` editor (day, total, fill remainder, Save, Clear
+  override) and a collapsed **Daily plan allocations (offers)** section
+  with the old per-category offer-allocation table and Spread evenly / By
+  pool size.
 
 The app is read-only toward Ozon: only `/v4/product/info/limit`, plus the
 read-only `catalog_status.py` / `category_inventory.py` snapshots, and the

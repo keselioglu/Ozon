@@ -443,9 +443,9 @@ def test_source_has_no_scheduler_write_switches():
 
 def test_daily_tab_registered_and_order_unchanged():
     assert ui.TAB_BUILDERS["Daily tasks"] is ui.DailyTasksTab
-    assert ui.TAB_NAMES == ("Overview", "Daily tasks", "Prioritization")
+    assert ui.TAB_NAMES == ("Overview", "Daily tasks", "New Product Adding")
     assert list(ui.TAB_BUILDERS) == list(ui.TAB_NAMES)
-    assert ui.DEFAULT_TAB == "Prioritization"
+    assert ui.DEFAULT_TAB == "New Product Adding"
     assert set(ui.COMMANDS) == {"catalog_status", "inventory", "walk", "preview", "account_snapshot"}
     assert set(ui.TIMEOUTS) == set(ui.COMMANDS)
 

@@ -320,9 +320,10 @@ def test_shortcut_names(monkeypatch, tmp_path):
 
 def test_app_title_and_tabs():
     assert ui.APP_TITLE == "Ozon Sales"
-    assert ui.TAB_NAMES == ("Overview", "Daily tasks", "Prioritization")
+    assert ui.TAB_NAMES == ("Overview", "Daily tasks", "New Product Adding")
     assert ui.tab_names() == list(ui.TAB_NAMES)
-    assert ui.DEFAULT_TAB == "Prioritization"
+    assert ui.DEFAULT_TAB == "New Product Adding"
+    assert ui.NewProductAddingTab is ui.PrioritizationTab
     assert ui.PlannerApp is ui.OzonSalesApp
 
 
@@ -362,7 +363,7 @@ def test_register_tab_appends_replaces_in_place_and_decorates(monkeypatch):
 
 def test_register_tab_changes_are_restored():
     assert ui.tab_names() == list(ui.TAB_NAMES)
-    assert ui.TAB_BUILDERS["Prioritization"] is ui.PrioritizationTab
+    assert ui.TAB_BUILDERS["New Product Adding"] is ui.PrioritizationTab
 
 
 def test_read_only_endpoints_and_commands_unchanged():
@@ -373,3 +374,69 @@ def test_read_only_endpoints_and_commands_unchanged():
     assert ui.COMMANDS["walk"] == ["category_inventory.py", "--walk"]
     assert ui.COMMANDS["preview"] == ["upload_to_ozon.py", "--dry-run"]
     assert ui.COMMANDS["account_snapshot"] == ["account_snapshot.py"]
+
+
+# --- New Product Adding table -------------------------------------------------
+
+def test_source_uses_new_product_plan_and_new_sources_without_new_endpoints():
+    with open(APP_PATH, encoding="utf-8") as f:
+        src = f.read()
+    assert "import new_product_plan" in src and "import new_sources" in src
+    assert "new_product_plan.build_rows(" in src
+    assert "new_product_plan.save_plan(" in src
+    assert "new_sources.create_request(" in src
+    endpoints = set(re.findall(r"[\"'](/v\d+/[a-z0-9/_\-]+)[\"']", src))
+    assert endpoints == {"/v4/product/info/limit"}
+    # bare mentions (docs/comments) may only name the quota read, or the upload
+    # endpoint the --dry-run exits before
+    assert set(re.findall(r"/v\d+/[a-z0-9/_\-]+", src)) <= {"/v4/product/info/limit", "/v3/product/import"}
+    assert ui.READ_ONLY_ENDPOINTS == frozenset({"/v4/product/info/limit"})
+    assert not any(m in src for m in ("import requests", "urllib.request", "http.client", "urlopen"))
+    assert "NewProductAddingTab" in src
+    assert ui.NP_CAPTION.startswith("URL targets and priorities are saved for the add run")
+    assert ui.ALLOC_SECTION_TITLE == "Daily plan allocations (offers)"
+
+
+def test_urls_entry_validation_and_parse():
+    assert ui.urls_entry_ok("") and ui.urls_entry_ok("120")
+    assert not ui.urls_entry_ok("-1") and not ui.urls_entry_ok("1.5") and not ui.urls_entry_ok("abc")
+    assert not ui.urls_entry_ok("1" * (ui.URLS_MAX_DIGITS + 1))
+    assert ui.parse_urls_to_add(" 007 ") == 7
+    for bad in ("", "  ", "-3", "x", None):
+        with pytest.raises(ValueError):
+            ui.parse_urls_to_add(bad)
+
+
+def test_priority_labels_and_fmt():
+    assert ui.priority_from_label("Very high") == "very_high"
+    assert ui.priority_from_label("Very low") == "very_low"
+    assert ui.priority_from_label("nope") is None
+    assert ui.np_fmt(None) == "—" and ui.np_fmt(1234) == "1,234" and ui.np_fmt(True) == "—"
+
+
+def test_np_dirty_and_save_state():
+    import new_product_plan as npp
+    saved = npp.default_plan()
+    assert ui.np_save_state(saved, saved) == ([], "")
+    same = npp.set_entry(saved, "M&S", "Pajama", priority="medium", urls_to_add=0)
+    assert not ui.np_is_dirty(same, saved)  # explicit defaults == missing entry
+    changed = npp.set_entry(saved, "M&S", "Pajama", urls_to_add=5)
+    assert ui.np_is_dirty(changed, saved)
+    assert ui.np_save_state(changed, saved) == ([], "Unsaved changes.")
+    bad = {"version": 1, "categories": {"H&M/All": {"urls_to_add": 3}}}
+    errors, note = ui.np_save_state(bad, saved)
+    assert errors and note.startswith("Can't save")
+
+
+def test_np_rows_sort_and_add_buttons():
+    import new_product_plan as npp
+    inv = {"brands": {"M&S": {"categories": {
+        "Pajama": {"live_products": 10, "crawled_not_live_products": 4, "discovered_not_live_products": 3},
+        "Socks": {"live_products": 2, "crawled_not_live_products": 1}}}}}
+    plan = npp.set_entry(npp.default_plan(), "M&S", "Socks", priority="very_high")
+    rows = npp.build_rows(inv, plan)
+    assert rows[0]["category"] == "Socks" and rows[-1]["brand"] == "H&M"
+    pj = next(r for r in rows if r["category"] == "Pajama")
+    assert (pj["total_urls"], pj["eligible_urls"]) == (17, 7)
+    assert npp.add_all(pj) == 7 and npp.add_half(pj) == 3
+    assert ui.np_fmt(rows[-1]["eligible_urls"]) == "—"

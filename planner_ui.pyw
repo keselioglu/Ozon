@@ -21,9 +21,9 @@ Tabs, in order:
     button) or the 60s auto-refresh, never two collects at once. A
     recheck_stockouts timeout, and an account_snapshot failure or timeout
     (warning-only step), are shown as warnings, not failures.
-  * Prioritization (opens first) -- the daily planner: splits the day's
-    new-offer plan (daily_plan.json) by brand x category, with the numbers
-    to decide on.
+  * New Product Adding (opens first; class PrioritizationTab, alias
+    NewProductAddingTab) -- the URL targets per brand x sub category from
+    new_product_plan.json, plus the daily offer plan (daily_plan.json).
 
 Later tasks add or replace tabs through the module-level hook
 register_tab(name, builder), usable as a plain call or as a decorator;
@@ -32,17 +32,28 @@ label, button) and a tk.Frame already added to the notebook. Tabs must hand
 worker-thread results back through app.post (the shell's single queue) and
 never touch Tk from a thread or start their own poll loop.
 
-Prioritization tab:
+New Product Adding tab:
   * header: Ozon daily_create quota (live read of /v4/product/info/limit,
     'unknown' if it fails), today's plan created/planned
     (new_items_submitted.json), deferred queue size, and per-brand catalog
     numbers from catalog_status.json
-  * table: one row per brand x category from category_inventory.json, with
-    the selected day's allocation (double-click to edit; H&M rows are
-    read-only -- no add pipeline yet)
-  * plan editor: Default / Today / Today+1..+7 overrides, total, fill
-    remainder, Spread evenly / By pool size, Save (daily_plan.save_plan,
-    blocked while daily_plan.validate_plan reports errors), Clear override
+  * URL table (scrollable grid, new_product_plan.build_rows over
+    category_inventory.json + new_product_plan.json): Brand | Sub category |
+    Priority (Very high..Very low; changing it re-sorts the rows) | Total
+    URLs | Eligible URLs | URLs to add (int entry, warning colour above
+    eligible) | Add all / Add half. The H&M row is read-only ('—', no add
+    pipeline yet / website check pending). Save writes new_product_plan.json
+    (blocked while new_product_plan.validate_plan reports errors). 'Add a new
+    website' opens a form whose Create epic calls new_sources.create_request
+    (new_source_requests.json + an EPIC block under '## Todo' in TASKS.md;
+    the URL is never fetched). These targets are saved only: the scheduled
+    upload still caps by the daily plan (offers).
+  * daily-plan editor: Default / Today / Today+1..+7 overrides, total, fill
+    remainder, Save (daily_plan.save_plan, blocked while
+    daily_plan.validate_plan reports errors), Clear override
+  * 'Daily plan allocations (offers)' (collapsed by default): the old
+    offer-allocation table (double-click Allocation to edit; H&M read-only)
+    with Spread evenly / By pool size
   * actions: Refresh numbers, Full site walk (slow), Preview today's split
     (upload_to_ozon.py --dry-run)
 
@@ -83,6 +94,8 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import daily_plan  # noqa: E402  (pure logic + local JSON; never calls Ozon)
+import new_product_plan  # noqa: E402  (pure logic + local JSON; never calls Ozon)
+import new_sources  # noqa: E402  (offline: local JSON + TASKS.md; never fetches the URL)
 import task_status  # noqa: E402  (read-only: local JSON + a scheduler query, never changes a task)
 
 INVENTORY_FILE = "category_inventory.json"
@@ -400,6 +413,66 @@ def save_plan_from_ui(plan, path=PLAN_FILE):
     if errors:
         return None, errors
     return daily_plan.save_plan(plan, path), []
+
+
+# --- New Product Adding table (pure) -------------------------------------------------
+
+NP_PLAN_FILE = new_product_plan.PLAN_FILE
+NP_COLUMNS = (("brand", "Brand"), ("category", "Sub category"), ("priority", "Priority"),
+              ("total_urls", "Total URLs"), ("eligible_urls", "Eligible URLs"),
+              ("urls_to_add", "URLs to add"), ("actions", ""))
+NP_CAPTION = ("URL targets and priorities are saved for the add run; the scheduled upload still caps "
+              "by the daily plan (offers). Website check for M&S/H&M: pending (backlog).")
+ALLOC_SECTION_TITLE = "Daily plan allocations (offers)"
+URLS_MAX_DIGITS = 7
+
+
+def np_fmt(value):
+    """'—' for a missing count, else a thousands-separated int."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return f"{value:,}"
+    return DASH
+
+
+def urls_entry_ok(proposed):
+    """Tk validatecommand for 'URLs to add': digits only (or empty while typing)."""
+    return proposed == "" or (proposed.isdigit() and len(proposed) <= URLS_MAX_DIGITS)
+
+
+def parse_urls_to_add(text):
+    """int >= 0 from the entry text; ValueError for anything else (incl. empty)."""
+    t = (text or "").strip()
+    if not t.isdigit() or len(t) > URLS_MAX_DIGITS:
+        raise ValueError(f"URLs to add must be a whole number >= 0 (got {text!r})")
+    return int(t)
+
+
+def priority_from_label(label):
+    """'Very high' -> 'very_high'; None for an unknown label."""
+    return dict(zip(new_product_plan.PRIORITY_LABELS, new_product_plan.PRIORITIES)).get(label)
+
+
+def np_is_dirty(plan, saved):
+    """True when any brand/category's priority or urls_to_add differs from
+    the saved plan (missing entries count as the defaults)."""
+    def cats(p):
+        c = p.get("categories") if isinstance(p, dict) else None
+        return c if isinstance(c, dict) else {}
+    for key in set(cats(plan)) | set(cats(saved)):
+        brand, _, label = str(key).partition("/")
+        if new_product_plan.get_entry(plan, brand, label) != new_product_plan.get_entry(saved, brand, label):
+            return True
+    return False
+
+
+def np_save_state(plan, saved):
+    """(errors, note) for the URL table's Save button and its note."""
+    errors = new_product_plan.validate_plan(plan)
+    if errors:
+        return errors, "Can't save: " + "; ".join(errors)
+    if np_is_dirty(plan, saved):
+        return errors, "Unsaved changes."
+    return errors, ""
 
 
 # --- Background work (never on the UI thread) -------------------------------------
@@ -1154,9 +1227,10 @@ def sources_warnings(snap):
 APP_TITLE = "Ozon Sales"
 TAB_OVERVIEW = "Overview"
 TAB_DAILY = "Daily tasks"
-TAB_PRIORITIZATION = "Prioritization"
+TAB_PRIORITIZATION = "New Product Adding"
+TAB_NEW_PRODUCT_ADDING = TAB_PRIORITIZATION
 TAB_NAMES = (TAB_OVERVIEW, TAB_DAILY, TAB_PRIORITIZATION)
-DEFAULT_TAB = TAB_PRIORITIZATION  # the planner opens first
+DEFAULT_TAB = TAB_PRIORITIZATION  # New Product Adding opens first
 DAILY_REFRESH_MS = 60_000  # Daily tasks auto-refresh interval
 DAILY_FIRST_REFRESH_MS = 100
 
@@ -1557,7 +1631,9 @@ build_overview_tab = OverviewTab  # backward-compatible name
 
 
 class PrioritizationTab(_WidgetHelpers):
-    """The planner: quota cards, brand x category table, plan editor, actions."""
+    """New Product Adding: quota cards, the URL-target table (priority, URLs
+    to add, Add all / Add half, Save, Add a new website), the daily-plan
+    editor, the collapsible offer-allocation table, actions."""
 
     def __init__(self, app, parent):
         self.app = app
@@ -1575,6 +1651,13 @@ class PrioritizationTab(_WidgetHelpers):
         self.busy = set()
         self.rows = []
         self.editor = None
+        self.np_plan = new_product_plan.load_plan(str(HERE / NP_PLAN_FILE))
+        self.np_saved = copy.deepcopy(self.np_plan)
+        self.np_rows = []
+        self.np_vars = {}  # (brand, category) -> (StringVar, Entry, eligible)
+        self._np_render_pending = False
+        self.alloc_open = False
+        self.website_win = None
 
         self.total_var = tk.StringVar(value=str(self.day["total"]))
         self.fill_var = tk.BooleanVar(value=self.day["fill_remainder"])
@@ -1586,14 +1669,15 @@ class PrioritizationTab(_WidgetHelpers):
         outer.pack(fill="both", expand=True)
         head = tk.Frame(outer, bg=BG)
         head.pack(fill="x")
-        self.label(head, "Prioritization", 14, bold=True).pack(side="left")
+        self.label(head, TAB_NEW_PRODUCT_ADDING, 14, bold=True).pack(side="left")
         self.built_label = self.label(head, "", 9, MUTED)
         self.built_label.pack(side="right")
         self.cards = tk.Frame(outer, bg=BG)
         self.cards.pack(fill="x", pady=(10, 0))
 
-        self._build_table(outer)
+        self._build_np_table(outer)
         self._build_editor(outer)
+        self._build_alloc_section(outer)
         self._build_actions(outer)
 
         self.load_local()
@@ -1614,12 +1698,79 @@ class PrioritizationTab(_WidgetHelpers):
         self.label(f, sub, 8, sub_color, wraplength=self.px(220)).pack(anchor="w")
 
     # ---------- layout ----------
+    def _build_np_table(self, parent):
+        """Scrollable grid (Canvas + Frame, mouse wheel like DailyTasksTab)."""
+        tk = self.tk
+        bar = tk.Frame(parent, bg=BG)
+        bar.pack(fill="x", pady=(10, 0))
+        self.label(bar, "URLs to add per sub category", 11, FG, True).pack(side="left")
+        self.website_btn = self.button(bar, "Add a new website", self.open_website_form)
+        self.website_btn.pack(side="right")
+        self.np_save_btn = self.button(bar, "Save", self.on_np_save, accent=True)
+        self.np_save_btn.pack(side="right", padx=(0, 6))
+        self.np_note = self.label(bar, "", 9, MUTED)
+        self.np_note.pack(side="right", padx=(0, 10))
+
+        wrap = tk.Frame(parent, bg=BG)
+        wrap.pack(fill="both", expand=True, pady=(6, 0))
+        self.np_canvas = tk.Canvas(wrap, bg=CARD, highlightthickness=0, bd=0, height=self.px(220))
+        sb = self.ttk.Scrollbar(wrap, orient="vertical", command=self.np_canvas.yview)
+        self.np_canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.np_canvas.pack(side="left", fill="both", expand=True)
+        self.np_grid = tk.Frame(self.np_canvas, bg=CARD, padx=8, pady=6)
+        self._np_win = self.np_canvas.create_window((0, 0), window=self.np_grid, anchor="nw")
+        self.np_grid.bind("<Configure>", lambda e: self.np_canvas.configure(
+            scrollregion=self.np_canvas.bbox("all")))
+        self.np_canvas.bind("<Configure>", lambda e: self.np_canvas.itemconfigure(
+            self._np_win, width=e.width))
+        self.np_canvas.bind("<Enter>", lambda e: self.np_canvas.bind_all("<MouseWheel>", self._on_np_wheel))
+        self.np_canvas.bind("<Leave>", lambda e: self.np_canvas.unbind_all("<MouseWheel>"))
+        self._np_vcmd = (self.app.root.register(urls_entry_ok), "%P")
+        self.label(parent, NP_CAPTION, 8, MUTED, wraplength=self.px(1100)).pack(anchor="w", pady=(4, 0))
+
+    def _on_np_wheel(self, event):
+        try:
+            self.np_canvas.yview_scroll(int(-event.delta / 120) or (-1 if event.delta > 0 else 1), "units")
+        except Exception:
+            pass
+
+    def _build_alloc_section(self, parent):
+        """The old offer-allocation table + Spread evenly / By pool size, in a
+        section that is collapsed by default."""
+        tk = self.tk
+        self.alloc_toggle = tk.Button(parent, text="", command=self.toggle_alloc, bg=BG, fg=FG,
+                                      activebackground=BG, activeforeground=FG, relief="flat", bd=0,
+                                      font=(FONT, 9, "bold"), anchor="w", cursor="hand2")
+        self.alloc_toggle.pack(fill="x", pady=(8, 0))
+        self.alloc_body = tk.Frame(parent, bg=BG)  # packed only while open
+        helpers = tk.Frame(self.alloc_body, bg=BG)
+        helpers.pack(fill="x", pady=(4, 0))
+        self.button(helpers, "Spread evenly", self.on_spread_evenly).pack(side="left")
+        self.button(helpers, "By pool size", self.on_by_pool).pack(side="left", padx=(6, 0))
+        self.label(helpers, "Changes the selected day's offer allocations; Save in the plan editor above.",
+                   8, MUTED).pack(side="left", padx=(10, 0))
+        self._build_table(self.alloc_body)
+        self._update_alloc_toggle()
+
+    def _update_alloc_toggle(self):
+        self.alloc_toggle.configure(text=("▾ " if self.alloc_open else "▸ ") + ALLOC_SECTION_TITLE)
+
+    def toggle_alloc(self):
+        self.alloc_open = not self.alloc_open
+        if self.alloc_open:
+            self.alloc_body.pack(fill="both", expand=True, after=self.alloc_toggle)
+        else:
+            self._close_editor()
+            self.alloc_body.pack_forget()
+        self._update_alloc_toggle()
+
     def _build_table(self, parent):
         tk, ttk = self.tk, self.ttk
         wrap = tk.Frame(parent, bg=BG)
-        wrap.pack(fill="both", expand=True, pady=(10, 0))
+        wrap.pack(fill="both", expand=True, pady=(6, 0))
         self.tree = ttk.Treeview(wrap, columns=[c[0] for c in COLUMNS], show="headings",
-                                 selectmode="browse", height=15)
+                                 selectmode="browse", height=8)
         for key, heading, width in COLUMNS:
             self.tree.heading(key, text=heading)
             self.tree.column(key, width=self.px(width), anchor="w" if key in ("brand", "category") else "e",
@@ -1654,8 +1805,6 @@ class PrioritizationTab(_WidgetHelpers):
         tk.Checkbutton(f, text="Fill remainder in priority order", variable=self.fill_var,
                        command=self.on_fill_changed, bg=CARD, fg=FG, selectcolor=BG,
                        activebackground=CARD, activeforeground=FG, font=(FONT, 9)).grid(row=0, column=4, padx=(0, 14))
-        self.button(f, "Spread evenly", self.on_spread_evenly).grid(row=0, column=5, padx=(0, 6))
-        self.button(f, "By pool size", self.on_by_pool).grid(row=0, column=6, padx=(0, 14))
         self.sum_label = self.label(f, "", 10, FG, True)
         self.sum_label.grid(row=0, column=7, sticky="w")
         f.columnconfigure(8, weight=1)
@@ -1693,6 +1842,11 @@ class PrioritizationTab(_WidgetHelpers):
         self.created = created_from_history(self.inventory, self.today)
         if self.created_by_cat is not None:
             self.created = merge_created_today(self.created, self.created_by_cat)
+        if np_is_dirty(self.np_plan, self.np_saved):
+            self.status_var.set(f"Kept your unsaved URL targets ({NP_PLAN_FILE} not reloaded).")
+        else:
+            self.np_plan = new_product_plan.load_plan(str(HERE / NP_PLAN_FILE))
+            self.np_saved = copy.deepcopy(self.np_plan)
         self.render()
 
     def start_background_reads(self):
@@ -1725,8 +1879,210 @@ class PrioritizationTab(_WidgetHelpers):
     # ---------- drawing ----------
     def render(self):
         self.render_cards()
+        self.render_np_table()
         self.render_table()
         self.render_editor()
+
+    # ---------- New Product Adding table ----------
+    def render_np_table(self):
+        """Rebuilds the grid from new_product_plan.build_rows (sorted by priority)."""
+        self._np_render_pending = False
+        tk, ttk = self.tk, self.ttk
+        for w in self.np_grid.winfo_children():
+            w.destroy()
+        self.np_vars = {}
+        self.np_rows = new_product_plan.build_rows(self.inventory, self.np_plan)
+        g = self.np_grid
+        for col, (_, heading) in enumerate(NP_COLUMNS):
+            self.label(g, heading, 9, MUTED, True).grid(row=0, column=col, sticky="w", padx=(0, 14), pady=(0, 4))
+        g.columnconfigure(len(NP_COLUMNS), weight=1)
+        for i, row in enumerate(self.np_rows, start=1):
+            editable = bool(row.get("editable"))
+            color = FG if editable else DIM
+            brand, cat = row["brand"], row["category"]
+            self.label(g, brand, 9, color).grid(row=i, column=0, sticky="w", padx=(0, 14), pady=2)
+            self.label(g, cat, 9, color).grid(row=i, column=1, sticky="w", padx=(0, 14), pady=2)
+            pvar = tk.StringVar(value=row.get("priority_label") or DASH)
+            combo = ttk.Combobox(g, textvariable=pvar, state="readonly" if editable else "disabled",
+                                 values=list(new_product_plan.PRIORITY_LABELS), width=10)
+            combo.grid(row=i, column=2, sticky="w", padx=(0, 14), pady=2)
+            # the wheel scrolls the table; it must never cycle a priority by accident
+            combo.bind("<MouseWheel>", lambda e: (self._on_np_wheel(e), "break")[1])
+            if editable:
+                combo.bind("<<ComboboxSelected>>",
+                           lambda e, b=brand, c=cat, v=pvar: self.on_np_priority(b, c, v.get()))
+            self.label(g, np_fmt(row.get("total_urls")), 9, color, anchor="e").grid(
+                row=i, column=3, sticky="e", padx=(0, 14), pady=2)
+            self.label(g, np_fmt(row.get("eligible_urls")), 9, color, anchor="e").grid(
+                row=i, column=4, sticky="e", padx=(0, 14), pady=2)
+            uvar = tk.StringVar(value=str(row["urls_to_add"]) if editable else DASH)
+            ent = tk.Entry(g, textvariable=uvar, width=8, justify="right", bg=BG, fg=FG,
+                           insertbackground=FG, relief="flat", font=(FONT, 9), disabledbackground=CARD,
+                           disabledforeground=DIM)
+            ent.grid(row=i, column=5, sticky="w", padx=(0, 14), pady=2)
+            btns = tk.Frame(g, bg=CARD)
+            btns.grid(row=i, column=6, sticky="w", pady=2)
+            all_btn = self.button(btns, "Add all", lambda b=brand, c=cat: self.on_np_fill(b, c, "all"))
+            half_btn = self.button(btns, "Add half", lambda b=brand, c=cat: self.on_np_fill(b, c, "half"))
+            all_btn.pack(side="left")
+            half_btn.pack(side="left", padx=(6, 0))
+            if editable:
+                ent.configure(validate="key", validatecommand=self._np_vcmd)
+                ent.bind("<Return>", lambda e, b=brand, c=cat: self.on_np_urls_commit(b, c))
+                ent.bind("<FocusOut>", lambda e, b=brand, c=cat: self.on_np_urls_commit(b, c))
+                ent.bind("<Escape>", lambda e, b=brand, c=cat: self._np_revert(b, c, None))
+                self.np_vars[(brand, cat)] = (uvar, ent, row.get("eligible_urls") or 0)
+                self._np_color(brand, cat)
+            else:
+                ent.configure(state="disabled")
+                all_btn.configure(state="disabled")
+                half_btn.configure(state="disabled")
+            if row.get("note"):
+                self.label(g, row["note"], 8, MUTED).grid(row=i, column=7, sticky="w", padx=(6, 0), pady=2)
+        self.render_np_state()
+
+    def render_np_state(self):
+        errors, note = np_save_state(self.np_plan, self.np_saved)
+        self.np_save_btn.configure(state="disabled" if errors else "normal")
+        self.np_note.configure(text=note, fg=STATUS["critical"] if errors else
+                               (STATUS["warning"] if note else MUTED))
+
+    def _np_color(self, brand, cat):
+        item = self.np_vars.get((brand, cat))
+        if not item:
+            return
+        var, ent, eligible = item
+        try:
+            over = parse_urls_to_add(var.get()) > eligible
+        except ValueError:
+            over = False
+        ent.configure(fg=STATUS["warning"] if over else FG)
+
+    def _np_revert(self, brand, cat, message):
+        item = self.np_vars.get((brand, cat))
+        if item:
+            item[0].set(str(new_product_plan.get_entry(self.np_plan, brand, cat)["urls_to_add"]))
+            self._np_color(brand, cat)
+        if message:
+            self.status_var.set(message)
+
+    def _schedule_np_render(self):
+        """Re-sort after the current event finishes (never destroy the widget
+        whose event handler is still running)."""
+        if not self._np_render_pending:
+            self._np_render_pending = True
+            self.app.root.after_idle(self.render_np_table)
+
+    def on_np_priority(self, brand, cat, label):
+        prio = priority_from_label(label)
+        try:
+            self.np_plan = new_product_plan.set_entry(self.np_plan, brand, cat, priority=prio)
+        except ValueError as err:
+            self.status_var.set(f"Priority not changed: {err}")
+            self._schedule_np_render()
+            return
+        self.status_var.set(f"{brand} {cat}: priority {label}. Rows re-sorted.")
+        self._schedule_np_render()
+
+    def _np_set_urls(self, brand, cat, n):
+        try:
+            self.np_plan = new_product_plan.set_entry(self.np_plan, brand, cat, urls_to_add=n)
+        except ValueError as err:
+            self._np_revert(brand, cat, f"URLs to add not changed: {err}")
+            return
+        self._np_color(brand, cat)
+        self.render_np_state()
+
+    def on_np_urls_commit(self, brand, cat):
+        item = self.np_vars.get((brand, cat))
+        if not item:
+            return
+        text = item[0].get()
+        try:
+            n = parse_urls_to_add(text)
+        except ValueError as err:
+            self._np_revert(brand, cat, f"{brand} {cat}: {err}; reverted.")
+            return
+        if n != new_product_plan.get_entry(self.np_plan, brand, cat)["urls_to_add"]:
+            self._np_set_urls(brand, cat, n)
+        item[0].set(str(n))  # normalises e.g. '007' -> '7'
+
+    def on_np_fill(self, brand, cat, mode):
+        row = next((r for r in self.np_rows if r["brand"] == brand and r["category"] == cat), None)
+        item = self.np_vars.get((brand, cat))
+        if row is None or item is None:
+            return
+        n = new_product_plan.add_all(row) if mode == "all" else new_product_plan.add_half(row)
+        item[0].set(str(n))
+        self._np_set_urls(brand, cat, n)
+
+    def on_np_save(self):
+        try:
+            saved = new_product_plan.save_plan(self.np_plan, str(HERE / NP_PLAN_FILE))
+        except (ValueError, OSError) as err:
+            self.status_var.set(f"Not saved: {err}")
+            self.render_np_state()
+            return
+        self.np_plan = saved
+        self.np_saved = copy.deepcopy(saved)
+        self.status_var.set(f"Saved {NP_PLAN_FILE} ({datetime.now():%H:%M:%S}).")
+        self.render_np_state()
+
+    # ---------- Add a new website (local file writes only; UI thread) ----------
+    def open_website_form(self):
+        tk = self.tk
+        if self.website_win is not None:
+            try:
+                self.website_win.lift()
+                self.website_win.focus_set()
+                return
+            except Exception:
+                self.website_win = None
+        win = tk.Toplevel(self.app.root)
+        self.website_win = win
+        win.title("Add a new website")
+        win.configure(bg=BG, padx=self.px(14), pady=self.px(12))
+        win.transient(self.app.root)
+        win.resizable(True, False)
+        self.label(win, "Add a new website", 12, FG, True).pack(anchor="w")
+        self.label(win, "Records a request and writes an EPIC under '## Todo' in TASKS.md. "
+                        "The website is not fetched.", 8, MUTED, wraplength=self.px(480)).pack(anchor="w", pady=(2, 8))
+        self.label(win, "Website URL", 9, MUTED).pack(anchor="w")
+        url_var = tk.StringVar()
+        url_ent = tk.Entry(win, textvariable=url_var, width=60, bg=CARD, fg=FG, insertbackground=FG,
+                           relief="flat", font=(FONT, 10))
+        url_ent.pack(fill="x", pady=(2, 8))
+        self.label(win, f"Description (what to sell from it, up to {new_sources.MAX_DESCRIPTION} characters)",
+                   9, MUTED).pack(anchor="w")
+        desc = tk.Text(win, height=6, width=60, bg=CARD, fg=FG, insertbackground=FG, relief="flat",
+                       font=(FONT, 10), wrap="word")
+        desc.pack(fill="x", pady=(2, 8))
+        err = self.label(win, "", 9, STATUS["critical"], wraplength=self.px(480))
+        err.pack(anchor="w")
+        btns = tk.Frame(win, bg=BG)
+        btns.pack(fill="x", pady=(8, 0))
+
+        def close():
+            self.website_win = None
+            win.destroy()
+
+        def create():
+            try:
+                rec = new_sources.create_request(
+                    url_var.get(), desc.get("1.0", "end-1c"),
+                    requests_path=str(HERE / new_sources.REQUESTS_FILE),
+                    tasks_path=str(HERE / new_sources.TASKS_FILE))
+            except (ValueError, OSError) as e:
+                err.configure(text=str(e))
+                return
+            close()
+            self.status_var.set(f"Epic created for {rec['url']} (request #{rec['id']}) in "
+                                f"{new_sources.TASKS_FILE}; saved to {new_sources.REQUESTS_FILE}.")
+
+        self.button(btns, "Cancel", close).pack(side="right")
+        self.button(btns, "Create epic", create, accent=True).pack(side="right", padx=(0, 6))
+        win.protocol("WM_DELETE_WINDOW", close)
+        url_ent.focus_set()
 
     def render_cards(self):
         for w in self.cards.winfo_children():
@@ -2010,6 +2366,9 @@ class PrioritizationTab(_WidgetHelpers):
         txt.insert("1.0", text or "(no output)")
         txt.see("end")
         txt.configure(state="disabled")
+
+
+NewProductAddingTab = PrioritizationTab  # the tab's current name
 
 
 register_tab(TAB_OVERVIEW, OverviewTab)

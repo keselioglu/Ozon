@@ -6,6 +6,8 @@ How this works: add new tasks under **Todo**. When we start one, it moves to **I
 
 ## Todo
 
+- Website check for M&S and H&M (feeds New Product Adding table)
+- Make discovery/upload honour New Product Adding URL targets and priorities
 - MVP2 ideas for #52 (Ozon Sales app):
   - Sales/revenue view
   - Editing the `category_priority.csv` order from the app

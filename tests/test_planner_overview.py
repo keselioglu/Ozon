@@ -379,7 +379,7 @@ def test_run_script_account_snapshot_not_found(tmp_path):
 def test_overview_tab_registered_first():
     assert ui.tab_names()[0] == "Overview"
     assert ui.TAB_BUILDERS["Overview"] is ui.OverviewTab
-    assert ui.DEFAULT_TAB == "Prioritization"
+    assert ui.DEFAULT_TAB == "New Product Adding"
 
 
 # --- optional real-Tk smoke test (skipped without a display) ---------------------
