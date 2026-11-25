@@ -426,12 +426,56 @@ def cap_new_items_by_plan(new_items, quota_remaining, today=None, plan_path=dail
     return accepted, capped
 
 
+def write_available_report(path, new_items):
+    """Per brand/category count of new offers that passed every upload check (dedup,
+    mapping, stock, not already on Ozon), before the daily plan cap. Atomic write."""
+    by_cat = {}
+    for it in new_items:
+        brand, label = plan_key(it)
+        key = f"{brand}/{label or 'Unmapped'}"
+        c = by_cat.setdefault(key, {"offers": 0, "articles": set()})
+        c["offers"] += 1
+        art = extract_article_code_from_offer_id(it.get("offer_id", ""))
+        if art:
+            c["articles"].add(art)
+    products = {}
+    for it in new_items:
+        oid = it.get("offer_id", "")
+        prefix = oid.rsplit("-", 1)[0] + "-" if "-" in oid else oid
+        brand, label = plan_key(it)
+        p = products.setdefault(prefix, {"offer_prefix": prefix, "brand": brand, "category": label,
+                                         "name": it.get("name"), "price_usd": it.get("price"), "sizes": []})
+        p["sizes"].append(oid[len(prefix):])
+    data = {"generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "source": PRODUCTS_CSV,
+            "total_offers": len(new_items),
+            "products": sorted(products.values(), key=lambda p: (str(p["category"]), -len(p["sizes"]))),
+            "by_category": {k: {"offers": v["offers"], "articles": len(v["articles"])}
+                            for k, v in sorted(by_cat.items(), key=lambda kv: -kv[1]["offers"])}}
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+    print(f"Ready-to-add report ({len(new_items)} offer(s)) written to {path}.\n")
+    return data
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Upload crawled M&S products to Ozon.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print today's plan split and exit before submitting anything "
                              "(no /v3/product/import, no log/deferred file writes).")
-    dry_run = parser.parse_args(argv).dry_run
+    parser.add_argument("--new-only", action="store_true",
+                        help="Create new offers only; never re-send offers that are already on Ozon "
+                             "(a re-send overwrites live price/photos/attributes with the crawled ones).")
+    parser.add_argument("--report", metavar="FILE",
+                        help="Write the new offers that pass every check, per brand/category (before the "
+                             "plan cap), to FILE as JSON. Works with --dry-run.")
+    parser.add_argument("--only", metavar="OFFER_PREFIX", action="append", default=[],
+                        help="Only upload offers whose offer_id starts with this prefix, e.g. "
+                             "MS-T37004660F-BROWNMIX- for one product/colour with all its sizes. Repeatable.")
+    args = parser.parse_args(argv)
+    dry_run, new_only = args.dry_run, args.new_only
     if dry_run:
         print("DRY RUN: nothing will be submitted to Ozon and no files will be written.\n")
 
@@ -499,6 +543,17 @@ def main(argv=None):
 
     print(f"\n{len(items)} item(s) ready to upload, {skipped} skipped (see {SKIPPED_LOG}).\n")
 
+    if args.only:
+        items = [it for it in items if any(it["offer_id"].startswith(p) for p in args.only)]
+        print(f"--only {', '.join(args.only)}: {len(items)} item(s) match: "
+              f"{', '.join(it['offer_id'] for it in items) or 'none'}\n")
+        if deferred_items:
+            print("--only: leaving the deferred queue for the next normal run.\n")
+            if not dry_run:  # load_deferred_items consumed the file -- put it back untouched
+                with open(DEFERRED_LOG, "w", encoding="utf-8") as f:
+                    json.dump(deferred_items, f, ensure_ascii=False)
+            deferred_items = []
+
     if not items:
         return print("Nothing to upload.")
 
@@ -513,6 +568,12 @@ def main(argv=None):
     new_items = [it for it in items if it["offer_id"] not in existing_offer_ids]
     update_items = [it for it in items if it["offer_id"] in existing_offer_ids]
     print(f"  {len(new_items)} new product(s) to create, {len(update_items)} existing to update.\n")
+    if new_only and update_items:
+        print(f"--new-only: not re-sending {len(update_items)} offer(s) that are already on Ozon.\n")
+        update_items = []
+
+    if args.report:
+        write_available_report(args.report, new_items)
 
     quota = check_quota()
     quota_remaining = None

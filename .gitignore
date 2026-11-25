@@ -52,3 +52,4 @@ account_snapshot.json
 .account_snapshot.json.tmp
 overview_metrics.json
 .overview_metrics.json.tmp
+available_to_add.json
