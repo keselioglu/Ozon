@@ -67,3 +67,4 @@ new_products.lock
 new_products_daily_*.log
 *.tmp
 hm_chrome_profile/
+content_rating_snapshot_hm.json

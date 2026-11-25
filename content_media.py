@@ -41,6 +41,7 @@ offline and in unit tests.
 """
 import json
 import os
+import re
 import shutil
 import time
 
@@ -88,6 +89,22 @@ def folder_key_for(article, color):
 
 def is_ms_offer_id(offer_id):
     return isinstance(offer_id, str) and offer_id.startswith(MS_PREFIX)
+
+
+_HM_OFFER_RE = re.compile(r"^HM-\d{10}-[0-9A-Z]+$")
+
+
+def is_hm_offer_id(offer_id):
+    """H&M offers in this pipeline's own shape HM-<10-digit article>-<size> (run_new_products /
+    the live H&M listings). Legacy HM1- / 1-HM- shapes stay out of scope."""
+    return isinstance(offer_id, str) and bool(_HM_OFFER_RE.match(offer_id))
+
+
+def require_content_offer_id(offer_id):
+    """MS- or HM-<article>-<size> offer_id, else ValueError (the content job's push scope)."""
+    if is_hm_offer_id(offer_id):
+        return offer_id
+    return require_ms_offer_id(offer_id)
 
 
 def require_ms_offer_id(offer_id):
@@ -397,8 +414,8 @@ def build_merged_import_item(live_record, price_info, images=None, attr_override
                        first and primary).
 
     price/currency_code/vat always come from price_info. Raises ValueError for
-    a non-MS offer_id or a missing price."""
-    offer_id = require_ms_offer_id(live_record.get("offer_id"))
+    an offer_id outside the content job's scope (MS- / HM-<article>-<size>) or a missing price."""
+    offer_id = require_content_offer_id(live_record.get("offer_id"))
     if not price_info or not str(price_info.get("price") or "").strip():
         raise ValueError(f"{offer_id}: no live price -- Ozon would reject an import without it")
 
@@ -475,7 +492,7 @@ def push_one_and_verify(item, checks, api_call=None, attempts=4, first_wait=3, r
     record and returning bool. Returns
     {"offer_id", "task_id", "status", "errors", "verified", "record"}."""
     call = _api(api_call)
-    offer_id = require_ms_offer_id(item.get("offer_id"))
+    offer_id = require_content_offer_id(item.get("offer_id"))
     if callable(checks):
         checks = [checks]
     checks = list(checks)
