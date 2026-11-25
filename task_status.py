@@ -11,9 +11,23 @@ Gathers three things:
       whether it is from today (local date, same as daily_run.TODAY).
   (c) Optional per-job last-run files that already exist
       (hm_stock_last_run.json, catalog_status.json 'runs').
+  (d) Per-task metrics from the LAST valid JSON line of each run-history file
+      (load_task_metrics; blank/corrupt lines are skipped, missing files give
+      no entry and no error; price_history.jsonl is never read):
+        'ms_stock'  <- stock_update_history.jsonl (refresh_live_stock.py)
+        'hm_stock'  <- hm_stock_update_history.jsonl (H&M stock update)
+        'price'     <- price_refresh_history.jsonl (refresh_prices.py) merged
+                       with price_update_history.jsonl (daily_price_update.py);
+                       each half keeps its own refresh_/update_ date and
+                       finished_at.
+      Every entry carries all of TASK_METRIC_FIELDS (None = not applicable or
+      unknown, e.g. old records without the newer keys -- never 0).
+      TASK_METRIC_KEYS maps a scheduled task's short name (case-insensitive)
+      to its metrics key; see metric_key_for_task().
 
-Public API: collect_status(now=None) -> dict. Never raises; problems are put
-into the result as error strings. CLI: `python task_status.py` prints tables.
+Public API: collect_status(now=None) -> dict (incl. 'task_metrics'). Never
+raises; problems are put into the result as error strings. CLI:
+`python task_status.py` prints tables.
 """
 import csv
 import io
@@ -38,6 +52,24 @@ CATALOG_STATUS_NAME = "catalog_status.json"
 RUN_STATUS_FILE = REPO_DIR / RUN_STATUS_NAME
 HM_LAST_RUN_FILE = REPO_DIR / HM_LAST_RUN_NAME
 CATALOG_STATUS_FILE = REPO_DIR / CATALOG_STATUS_NAME
+MS_STOCK_HISTORY_NAME = "stock_update_history.jsonl"
+HM_STOCK_HISTORY_NAME = "hm_stock_update_history.jsonl"
+PRICE_REFRESH_HISTORY_NAME = "price_refresh_history.jsonl"
+PRICE_UPDATE_HISTORY_NAME = "price_update_history.jsonl"
+
+# The six standard per-task metrics, in display order. Always present on every
+# load_task_metrics() entry; None when not applicable or unknown.
+TASK_METRIC_FIELDS = ("urls_checked", "prices_checked", "sku_price_updated",
+                      "campaign_limit_updated", "sku_stock_checked", "sku_stock_updated")
+# Scheduled task short name -> load_task_metrics() key (matched case-insensitively).
+TASK_METRIC_KEYS = {
+    "OzonSales_DailyStockUpdate": "ms_stock",
+    "OzonSales_DailyHMStockUpdate": "hm_stock",
+    "OzonSales_DailyPriceUpdate": "price",
+}
+# Only the tail of a history file is read first; the whole file only if the
+# tail holds no valid line.
+HISTORY_TAIL_BYTES = 64 * 1024
 
 SCHTASKS_TIMEOUT = 30
 # Case-insensitive substrings of the task's short name. The price / stock /
@@ -352,13 +384,148 @@ def load_last_run_rows(repo_dir=None):
 
 
 # --------------------------------------------------------------------------
+# (d) Per-task metrics
+# --------------------------------------------------------------------------
+
+def _last_json_line_from_text(text):
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None
+
+
+def read_last_json_line(path):
+    """-> (record_or_None, error_or_None). Last valid JSON-object line of a
+    .jsonl file; blank/corrupt lines are skipped. Missing -> (None, None).
+    Never raises."""
+    path = Path(path)
+    try:
+        if not path.exists():
+            return None, None
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            start = max(0, size - HISTORY_TAIL_BYTES)
+            f.seek(start)
+            data = f.read()
+            if start:
+                # drop the (probably partial) first line of the tail
+                data = data.split(b"\n", 1)[1] if b"\n" in data else b""
+            rec = _last_json_line_from_text(data.decode("utf-8", errors="replace"))
+            if rec is None and start:
+                f.seek(0)
+                rec = _last_json_line_from_text(f.read().decode("utf-8", errors="replace"))
+        if rec is None and size:
+            return None, f"{path.name}: no valid JSON line"
+        return rec, None
+    except Exception as e:
+        return None, f"could not read {path.name}: {type(e).__name__}"
+
+
+def _num(value):
+    """Count-like value or None (missing / null / non-numeric; never 0)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
+
+
+def _blank_metrics():
+    return {k: None for k in TASK_METRIC_FIELDS}
+
+
+def _ms_stock_metrics(rec):
+    m = _blank_metrics()
+    m.update(source=MS_STOCK_HISTORY_NAME, date=rec.get("date"),
+             finished_at=rec.get("finished_at"))
+    m["urls_checked"] = _num(rec.get("pages_checked"))
+    m["sku_stock_checked"] = _num(rec.get("products_checked"))
+    cmp_ = rec.get("comparison")
+    if isinstance(cmp_, dict):
+        inc, dec = _num(cmp_.get("increased")), _num(cmp_.get("decreased"))
+        m["sku_stock_updated"] = inc + dec if inc is not None and dec is not None else None
+    m["pages_failed"] = _num(rec.get("pages_failed"))
+    m["products_pushed_ok"] = _num(rec.get("products_pushed_ok"))
+    return m
+
+
+def _hm_stock_metrics(rec):
+    m = _blank_metrics()
+    m.update(source=HM_STOCK_HISTORY_NAME, date=rec.get("date"),
+             finished_at=rec.get("finished_at"))
+    m["urls_checked"] = _num(rec.get("products_read"))
+    m["sku_stock_checked"] = _num(rec.get("offers_live"))
+    m["sku_stock_updated"] = _num(rec.get("stock_changed"))
+    return m
+
+
+def _price_metrics(refresh, update):
+    m = _blank_metrics()
+    m["source"] = ", ".join(n for n, r in ((PRICE_REFRESH_HISTORY_NAME, refresh),
+                                           (PRICE_UPDATE_HISTORY_NAME, update)) if r)
+    refresh = refresh or {}
+    update = update or {}
+    m["refresh_date"] = refresh.get("date")
+    m["refresh_finished_at"] = refresh.get("finished_at")
+    m["update_date"] = update.get("date")
+    m["update_finished_at"] = update.get("finished_at")
+    m["urls_checked"] = _num(refresh.get("urls_checked"))
+    m["prices_checked"] = _num(refresh.get("prices_checked"))
+    m["sku_price_updated"] = _num(update.get("price_changed_ok"))
+    m["campaign_limit_updated"] = _num(update.get("limit_changed_ok"))
+    return m
+
+
+def metric_key_for_task(name):
+    """Scheduled task name (short or full path) -> TASK_METRIC_KEYS value, or
+    None. Case-insensitive."""
+    if not name:
+        return None
+    short = str(name).replace("/", "\\").rstrip("\\").split("\\")[-1].strip().lower()
+    for task, key in TASK_METRIC_KEYS.items():
+        if task.lower() == short:
+            return key
+    return None
+
+
+def load_task_metrics(repo_dir=None):
+    """-> (metrics, errors). metrics = {'ms_stock'|'hm_stock'|'price': entry};
+    a key is absent when its history file(s) don't exist. Only reads files;
+    never raises."""
+    base = Path(repo_dir) if repo_dir else REPO_DIR
+    metrics, errors = {}, []
+    try:
+        for key, name, build in (("ms_stock", MS_STOCK_HISTORY_NAME, _ms_stock_metrics),
+                                 ("hm_stock", HM_STOCK_HISTORY_NAME, _hm_stock_metrics)):
+            rec, err = read_last_json_line(base / name)
+            if err:
+                errors.append(err)
+            if rec is not None:
+                metrics[key] = build(rec)
+        refresh, err1 = read_last_json_line(base / PRICE_REFRESH_HISTORY_NAME)
+        update, err2 = read_last_json_line(base / PRICE_UPDATE_HISTORY_NAME)
+        errors.extend(e for e in (err1, err2) if e)
+        if refresh is not None or update is not None:
+            metrics["price"] = _price_metrics(refresh, update)
+    except Exception as e:  # pragma: no cover - defensive
+        errors.append(f"load_task_metrics failed: {type(e).__name__}: {e}")
+    return metrics, errors
+
+
+# --------------------------------------------------------------------------
 # Public API
 # --------------------------------------------------------------------------
 
 def collect_status(now=None, *, repo_dir=None, run_schtasks=True):
     """Everything the 'Daily tasks' view needs. Never raises."""
     result = {"collected_at": None, "today": None, "tasks": [], "daily_run": {"state": "unknown"},
-              "last_runs": [], "errors": []}
+              "last_runs": [], "task_metrics": {}, "errors": []}
     try:
         now = now or datetime.now()
         result["collected_at"] = now.isoformat(timespec="seconds")
@@ -378,6 +545,10 @@ def collect_status(now=None, *, repo_dir=None, run_schtasks=True):
 
         rows, errs = load_last_run_rows(base)
         result["last_runs"] = rows
+        result["errors"].extend(errs)
+
+        metrics, errs = load_task_metrics(base)
+        result["task_metrics"] = metrics
         result["errors"].extend(errs)
     except Exception as e:  # pragma: no cover - defensive
         result["errors"].append(f"collect_status failed: {type(e).__name__}: {e}")
@@ -429,6 +600,24 @@ def main():
     if st["last_runs"]:
         print(_table(["Source", "Job", "When", "Detail"],
                      [[r["source"], r["job"], r["when"], r["detail"]] for r in st["last_runs"]]))
+    else:
+        print("  (none)")
+
+    print("\nTask metrics (latest run)")
+    tm = st.get("task_metrics") or {}
+    if tm:
+        keys = sorted(tm)
+
+        def _when(m):
+            if "refresh_date" in m or "update_date" in m:
+                return (f"refresh {m.get('refresh_date') or '-'} / "
+                        f"update {m.get('update_date') or '-'}")
+            return m.get("date")
+
+        rows = [["date"] + [_when(tm[k]) for k in keys]]
+        rows += [[f] + ["-" if tm[k].get(f) is None else tm[k][f] for k in keys]
+                 for f in TASK_METRIC_FIELDS]
+        print(_table(["Metric"] + keys, rows))
     else:
         print("  (none)")
 

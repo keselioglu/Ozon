@@ -2,6 +2,7 @@
 import json
 import subprocess
 from datetime import datetime
+from pathlib import Path
 
 import task_status as ts
 
@@ -249,3 +250,153 @@ def test_no_mutating_schtasks_switches_in_source():
     src = open(ts.__file__, encoding="utf-8").read().lower()
     for bad in ("/create", "/change", "/run\"", "/run'", "/delete", "/end"):
         assert bad not in src
+
+
+# ---------------------------------------------------------------- task metrics (task #101)
+
+def _jsonl(path, *records, raw_tail=None):
+    lines = [json.dumps(r) for r in records]
+    if raw_tail is not None:
+        lines.append(raw_tail)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+MS_OLD = {"date": "2026-11-23", "finished_at": "2026-11-23T01:30:00", "pages_checked": 1,
+          "products_checked": 2, "comparison": {"increased": 0, "decreased": 0}}
+MS_REC = {"date": "2026-11-24", "finished_at": "2026-11-24T01:40:00", "pages_checked": 900,
+          "pages_failed": 3, "products_checked": 4100, "products_pushed_ok": 4050,
+          "comparison": {"increased": 12, "decreased": 30, "unchanged": 4000}}
+HM_REC = {"date": "2026-11-24", "finished_at": "2026-11-24T02:10:00", "products_read": 250,
+          "offers_live": 1800, "stock_changed": 44}
+REFRESH_REC = {"date": "2026-11-24", "finished_at": "2026-11-24T05:20:00", "urls_checked": 700,
+               "urls_failed": 2, "prices_checked": 3900, "prices_changed": 15}
+UPDATE_REC = {"date": "2026-11-23", "finished_at": "2026-11-23T05:40:00", "pushed_ok": 3800,
+              "price_changed_ok": 120, "limit_changed_ok": 340}
+
+
+def _all_fields(entry):
+    return all(k in entry for k in ts.TASK_METRIC_FIELDS)
+
+
+def test_task_metrics_normal_files(tmp_path):
+    _jsonl(tmp_path / "stock_update_history.jsonl", MS_OLD, MS_REC)
+    _jsonl(tmp_path / "hm_stock_update_history.jsonl", HM_REC)
+    _jsonl(tmp_path / "price_refresh_history.jsonl", REFRESH_REC)
+    _jsonl(tmp_path / "price_update_history.jsonl", UPDATE_REC)
+    m, errors = ts.load_task_metrics(tmp_path)
+    assert errors == []
+    assert set(m) == {"ms_stock", "hm_stock", "price"}
+    assert all(_all_fields(e) for e in m.values())
+
+    ms = m["ms_stock"]
+    assert (ms["urls_checked"], ms["sku_stock_checked"], ms["sku_stock_updated"]) == (900, 4100, 42)
+    assert (ms["pages_failed"], ms["products_pushed_ok"]) == (3, 4050)
+    assert ms["prices_checked"] is None and ms["sku_price_updated"] is None
+    assert ms["date"] == "2026-11-24" and ms["finished_at"] == "2026-11-24T01:40:00"
+
+    hm = m["hm_stock"]
+    assert (hm["urls_checked"], hm["sku_stock_checked"], hm["sku_stock_updated"]) == (250, 1800, 44)
+    assert hm["campaign_limit_updated"] is None
+
+    pr = m["price"]
+    assert (pr["urls_checked"], pr["prices_checked"]) == (700, 3900)
+    assert (pr["sku_price_updated"], pr["campaign_limit_updated"]) == (120, 340)
+    assert pr["sku_stock_checked"] is None and pr["sku_stock_updated"] is None
+    assert pr["refresh_date"] == "2026-11-24" and pr["update_date"] == "2026-11-23"
+    assert pr["refresh_finished_at"] == "2026-11-24T05:20:00"
+    assert pr["update_finished_at"] == "2026-11-23T05:40:00"
+
+
+def test_task_metrics_missing_files(tmp_path):
+    assert ts.load_task_metrics(tmp_path) == ({}, [])
+
+
+def test_task_metrics_never_reads_price_history(tmp_path, monkeypatch):
+    (tmp_path / "price_history.jsonl").write_text("{}\n", encoding="utf-8")
+    _jsonl(tmp_path / "price_update_history.jsonl", UPDATE_REC)
+    seen = []
+    real_open = open
+
+    def spy(file, *a, **k):
+        seen.append(str(file))
+        return real_open(file, *a, **k)
+
+    monkeypatch.setattr("builtins.open", spy)
+    ts.load_task_metrics(tmp_path)
+    assert seen and not any(Path(s).name == "price_history.jsonl" for s in seen)
+
+
+def test_task_metrics_corrupt_last_line_falls_back(tmp_path):
+    _jsonl(tmp_path / "stock_update_history.jsonl", MS_OLD, MS_REC, raw_tail='{"date": "2026-11-25", "pages')
+    (tmp_path / "hm_stock_update_history.jsonl").write_text(
+        json.dumps(HM_REC) + "\n\n   \nnot json\n[1, 2]\n", encoding="utf-8")
+    m, errors = ts.load_task_metrics(tmp_path)
+    assert errors == []
+    assert m["ms_stock"]["date"] == "2026-11-24" and m["ms_stock"]["urls_checked"] == 900
+    assert m["hm_stock"]["sku_stock_updated"] == 44
+
+
+def test_task_metrics_all_corrupt_reports_error(tmp_path):
+    (tmp_path / "stock_update_history.jsonl").write_text("garbage\n{bad\n", encoding="utf-8")
+    m, errors = ts.load_task_metrics(tmp_path)
+    assert "ms_stock" not in m
+    assert errors and "stock_update_history.jsonl" in errors[0]
+
+
+def test_task_metrics_large_file_tail(tmp_path, monkeypatch):
+    monkeypatch.setattr(ts, "HISTORY_TAIL_BYTES", 64)
+    p = tmp_path / "stock_update_history.jsonl"
+    _jsonl(p, MS_OLD, MS_REC)
+    m, _ = ts.load_task_metrics(tmp_path)
+    assert m["ms_stock"]["urls_checked"] == 900
+    # tail holds only garbage -> whole file is scanned
+    p.write_text(json.dumps(MS_REC) + "\n" + "x" * 500 + "\n", encoding="utf-8")
+    m, errors = ts.load_task_metrics(tmp_path)
+    assert m["ms_stock"]["urls_checked"] == 900 and errors == []
+
+
+def test_task_metrics_old_price_records_give_none(tmp_path):
+    _jsonl(tmp_path / "price_update_history.jsonl",
+           {"date": "2026-11-23", "finished_at": "2026-11-23T05:40:00", "pushed_ok": 3800})
+    m, errors = ts.load_task_metrics(tmp_path)
+    assert errors == []
+    pr = m["price"]
+    assert _all_fields(pr)
+    assert pr["sku_price_updated"] is None and pr["campaign_limit_updated"] is None
+    assert pr["urls_checked"] is None and pr["prices_checked"] is None
+    assert pr["update_date"] == "2026-11-23"
+    assert pr["refresh_date"] is None and pr["refresh_finished_at"] is None
+
+
+def test_task_metrics_comparison_null(tmp_path):
+    rec = dict(MS_REC, comparison=None)
+    _jsonl(tmp_path / "stock_update_history.jsonl", rec)
+    m, _ = ts.load_task_metrics(tmp_path)
+    assert m["ms_stock"]["sku_stock_updated"] is None
+    assert m["ms_stock"]["urls_checked"] == 900
+    no_cmp = {k: v for k, v in MS_REC.items() if k != "comparison"}
+    _jsonl(tmp_path / "stock_update_history.jsonl", no_cmp)
+    m, _ = ts.load_task_metrics(tmp_path)
+    assert m["ms_stock"]["sku_stock_updated"] is None
+
+
+def test_metric_key_for_task_case_insensitive():
+    assert ts.metric_key_for_task("OzonSales_DailyStockUpdate") == "ms_stock"
+    assert ts.metric_key_for_task("ozonsales_dailyhmstockupdate") == "hm_stock"
+    assert ts.metric_key_for_task(r"\OZONSALES_DAILYPRICEUPDATE") == "price"
+    assert ts.metric_key_for_task("MandsOzonDailyRun") is None
+    assert ts.metric_key_for_task(None) is None
+
+
+def test_collect_status_includes_task_metrics(tmp_path, monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("no subprocess allowed")
+
+    monkeypatch.setattr(ts.subprocess, "run", boom)
+    st = ts.collect_status(NOW, repo_dir=tmp_path, run_schtasks=False)
+    assert st["task_metrics"] == {}
+    _jsonl(tmp_path / "hm_stock_update_history.jsonl", HM_REC)
+    (tmp_path / "stock_update_history.jsonl").write_text("junk\n", encoding="utf-8")
+    st = ts.collect_status(NOW, repo_dir=tmp_path, run_schtasks=False)
+    assert st["task_metrics"]["hm_stock"]["sku_stock_checked"] == 1800
+    assert any("stock_update_history.jsonl" in e for e in st["errors"])
