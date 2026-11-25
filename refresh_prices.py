@@ -34,7 +34,7 @@ back-to-back).
 import json
 import sys
 import time
-from datetime import date
+from datetime import date, datetime
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -51,6 +51,17 @@ from refresh_live_stock import (
 
 PRICE_HISTORY_FILE = "price_history.jsonl"
 PRICE_CHANGES_FILE = "price_changes_today.json"
+PRICE_REFRESH_HISTORY_FILE = "price_refresh_history.jsonl"  # one run-summary line per run
+
+
+def append_refresh_record(today, urls_checked, urls_failed, prices_checked, prices_changed):
+    """Appends one run summary to PRICE_REFRESH_HISTORY_FILE (read by the
+    Ozon Sales app's Daily tasks tab)."""
+    rec = {"date": today, "finished_at": datetime.now().isoformat(timespec="seconds"),
+           "urls_checked": urls_checked, "urls_failed": urls_failed,
+           "prices_checked": prices_checked, "prices_changed": prices_changed}
+    with open(PRICE_REFRESH_HISTORY_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec) + "\n")
 
 
 def load_last_known_prices(path=PRICE_HISTORY_FILE):
@@ -118,6 +129,7 @@ def main():
     print(f"{len(known_offer_ids)} of them have a resolvable M&S URL — price will be checked today.\n")
 
     if not known_offer_ids:
+        append_refresh_record(today, 0, 0, 0, 0)
         return print("Nothing to check.")
 
     offer_ids_by_url = {}
@@ -158,6 +170,8 @@ def main():
 
     with open(PRICE_CHANGES_FILE, "w", encoding="utf-8") as f:
         json.dump({"date": today, "changes": changes}, f, ensure_ascii=False, indent=2)
+
+    append_refresh_record(today, len(offer_ids_by_url), fetch_failures, len(history_lines), len(changes))
 
     print(f"\n{len(history_lines)} price(s) recorded to {PRICE_HISTORY_FILE}.")
     print(f"{len(changes)} price change(s) vs. last known value — see {PRICE_CHANGES_FILE}.")
