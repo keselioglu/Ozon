@@ -511,3 +511,16 @@ def test_np_live_typing_updates_note_and_warning(monkeypatch, tmp_path):
     assert var.get() == ""
     import new_product_plan as npp
     assert npp.get_entry(tab.np_plan, "M&S", "Pajama")["urls_to_add"] == 9
+
+
+def test_opens_on_first_planned_day_and_planned_offers():
+    plan = daily_plan.default_plan()
+    assert ui.first_planned_day(plan, TODAY) == "Default"
+    plan["overrides"] = {"2026-11-26": {"total": 100, "fill_remainder": False,
+                                        "allocations": {"H&M": {"Dress": 20}, "M&S": {"Pajama": 20}}}}
+    assert ui.first_planned_day(plan, TODAY) == "2026-11-26"
+    day = ui.get_day(plan, "2026-11-26")
+    assert ui.planned_offers(day, "H&M", "Dress") == 20 and ui.planned_offers(day, "M&S", "Pajama") == 20
+    assert ui.planned_offers(day, "M&S", "Socks") == 0 and ui.planned_offers(None, "M&S", "Socks") == 0
+    plan["overrides"] = {"2026-12-30": {"total": 5}}  # outside the 7-day selector -> Default
+    assert ui.first_planned_day(plan, TODAY) == "Default"

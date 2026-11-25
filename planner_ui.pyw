@@ -318,6 +318,20 @@ def day_label(key, today):
     return f"{rel}  {key}"
 
 
+def first_planned_day(plan, today):
+    """The day the tab opens on: today or the first coming day (within the selector's range)
+    that has an override, else Default -- so the numbers the next run will use are on screen."""
+    for key in day_keys(today)[1:]:
+        if has_override(plan, key):
+            return key
+    return DEFAULT_KEY
+
+
+def planned_offers(day, brand, label):
+    n = ((day or {}).get("allocations") or {}).get(brand, {}).get(label)
+    return n if isinstance(n, int) and not isinstance(n, bool) else 0
+
+
 def has_override(plan, key):
     return key != DEFAULT_KEY and key in (plan.get("overrides") or {})
 
@@ -438,7 +452,7 @@ def save_plan_from_ui(plan, path=PLAN_FILE):
 NP_PLAN_FILE = new_product_plan.PLAN_FILE
 NP_COLUMNS = (("brand", "Brand"), ("category", "Sub category"), ("priority", "Priority"),
               ("total_urls", "Total URLs"), ("eligible_urls", "Eligible URLs"),
-              ("urls_to_add", "URLs to add"), ("actions", ""))
+              ("planned", "Planned offers"), ("urls_to_add", "URLs to add"), ("actions", ""))
 NP_CAPTION = ("Eligible = products on the M&S / H&M site that are not on Ozon yet (last site walk). URL targets "
               "and priorities are saved as notes; what the 03:00 job actually adds is the daily plan below "
               "(offers per brand x category).")
@@ -1661,7 +1675,7 @@ class PrioritizationTab(_WidgetHelpers):
         tk = self.tk
         self.today = daily_plan.utc_today()
         self.plan = daily_plan.load_plan(str(HERE / PLAN_FILE))
-        self.day_key = DEFAULT_KEY
+        self.day_key = first_planned_day(self.plan, self.today)
         self.day = get_day(self.plan, self.day_key)
         self.dirty = False
         self.quota = None
@@ -1916,8 +1930,10 @@ class PrioritizationTab(_WidgetHelpers):
         self.np_vars = {}
         self.np_rows = new_product_plan.build_rows(self.inventory, self.np_plan, self.hm_inventory)
         g = self.np_grid
-        for col, (_, heading) in enumerate(NP_COLUMNS):
-            self.label(g, heading, 9, MUTED, True).grid(row=0, column=col, sticky="w", padx=(0, 14), pady=(0, 4))
+        planned_head = f"Planned offers ({day_label(self.day_key, self.today).split('  ')[-1]})"
+        for col, (key, heading) in enumerate(NP_COLUMNS):
+            self.label(g, planned_head if key == "planned" else heading, 9, MUTED, True).grid(
+                row=0, column=col, sticky="w", padx=(0, 14), pady=(0, 4))
         g.columnconfigure(len(NP_COLUMNS), weight=1)
         for i, row in enumerate(self.np_rows, start=1):
             editable = bool(row.get("editable"))
@@ -1938,13 +1954,16 @@ class PrioritizationTab(_WidgetHelpers):
                 row=i, column=3, sticky="e", padx=(0, 14), pady=2)
             self.label(g, np_fmt(row.get("eligible_urls")), 9, color, anchor="e").grid(
                 row=i, column=4, sticky="e", padx=(0, 14), pady=2)
+            n_planned = planned_offers(self.day, brand, cat)
+            self.label(g, f"{n_planned:,}" if n_planned else DASH, 9, FG if n_planned else DIM,
+                       bold=bool(n_planned), anchor="e").grid(row=i, column=5, sticky="e", padx=(0, 14), pady=2)
             uvar = tk.StringVar(value=str(row["urls_to_add"]) if editable else DASH)
             ent = tk.Entry(g, textvariable=uvar, width=8, justify="right", bg=BG, fg=FG,
                            insertbackground=FG, relief="flat", font=(FONT, 9), disabledbackground=CARD,
                            disabledforeground=DIM)
-            ent.grid(row=i, column=5, sticky="w", padx=(0, 14), pady=2)
+            ent.grid(row=i, column=6, sticky="w", padx=(0, 14), pady=2)
             btns = tk.Frame(g, bg=CARD)
-            btns.grid(row=i, column=6, sticky="w", pady=2)
+            btns.grid(row=i, column=7, sticky="w", pady=2)
             all_btn = self.button(btns, "Add all", lambda b=brand, c=cat: self.on_np_fill(b, c, "all"))
             half_btn = self.button(btns, "Add half", lambda b=brand, c=cat: self.on_np_fill(b, c, "half"))
             all_btn.pack(side="left")
@@ -1962,7 +1981,7 @@ class PrioritizationTab(_WidgetHelpers):
                 all_btn.configure(state="disabled")
                 half_btn.configure(state="disabled")
             if row.get("note"):
-                self.label(g, row["note"], 8, MUTED).grid(row=i, column=7, sticky="w", padx=(6, 0), pady=2)
+                self.label(g, row["note"], 8, MUTED).grid(row=i, column=8, sticky="w", padx=(6, 0), pady=2)
         self.render_np_state()
 
     def render_np_state(self):
@@ -2202,6 +2221,7 @@ class PrioritizationTab(_WidgetHelpers):
         self.dirty = True
         self.render_table()
         self.render_editor()
+        self._schedule_np_render()  # keep 'Planned offers' in step with the allocation table
 
     def on_day_selected(self, _e=None):
         idx = self.day_combo.current()
@@ -2221,6 +2241,7 @@ class PrioritizationTab(_WidgetHelpers):
         self.fill_var.set(self.day["fill_remainder"])
         self.render_table()
         self.render_editor()
+        self._schedule_np_render()
 
     def on_total_changed(self):
         try:
