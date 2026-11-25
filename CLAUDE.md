@@ -73,19 +73,31 @@ never in a database.
     detects (log-only) any campaign product Ozon added itself
     (`add_mode != "MANUAL"`) rather than through step 9. See note below.
 15. **Account snapshot** (`account_snapshot.py`, 600s timeout) — read-only,
-    offline: rebuilds `account_snapshot.json` (version 2, the Ozon Sales
-    app's Overview data: per-brand offers / for sale / stock and price "up
-    to date" in the last 24h, per-warehouse SKU counts with avg/min/max live
-    price, and the campaigns/sales blocks copied from `overview_metrics.json`)
-    from `catalog_status.json`, `catalog_live_offer_ids.json`,
-    `catalog_live_prices.json`, `warehouse_assignments.json`,
+    offline: rebuilds `account_snapshot.json` (`"version": 2`, the Ozon
+    Sales app's Overview data). Keys: `brands` / `total` (per brand `offers`,
+    `for_sale`, `live_ids_count`, `stock_up_to_date`, `price_up_to_date`),
+    `up_to_date` (`hours: 24`, `runs`), `notes`, `warehouses` (per label
+    `skus`, `by_brand`, `price_count`, `avg_price` / `min_price` /
+    `max_price` in USD), `offers_by_warehouse`, and `campaigns` / `sales` /
+    `metrics_built_at` copied as they are from `overview_metrics.json`.
+    Inputs: `catalog_status.json`, `catalog_live_offer_ids.json`,
+    `catalog_live_prices.json` (each live SKU's Ozon `price.price`),
+    `warehouse_assignments.json`, `overview_metrics.json`,
     `stock_update_history.jsonl`, `price_update_history.jsonl` and
-    `hm_stock_last_run.json`. H&M/Other price "up to date" is 0 (no price
-    run exists). It never fails the run: a failure or
-    timeout is an attention line, and the Daily tasks tab shows it as a
-    warning. `catalog_status.json` itself is refreshed by `catalog_status.py`
-    (the app's button), not by daily_run, so the snapshot is only as fresh
-    as that file.
+    `hm_stock_last_run.json`. **24h up-to-date rule** (`UP_TO_DATE_HOURS`):
+    M&S stock = the newest `stock_update_history.jsonl` run that finished in
+    the last 24h → min(`products_pushed_ok`, M&S live); M&S price = the same
+    with `price_update_history.jsonl` / `pushed_ok`; H&M stock = live H&M
+    offer_ids with a numeric `stock` in `hm_stock_last_run.json` if its
+    `date` is within 24h. H&M/Other price and Other stock are 0 (no such
+    run exists). No run in the window → 0; a missing/corrupt source → null.
+    These are approximate (run summaries, not per-SKU stamps). It never
+    fails the run: a failure or timeout is an attention line, and the Daily
+    tasks tab shows it as a warning. `catalog_status.json` and the two
+    `catalog_live_*.json` files are written by `catalog_status.py`, not by
+    daily_run, so at 4am the snapshot is only as fresh as those files; the
+    10am `MandsOzonDailyReport` launcher refreshes them and rebuilds the
+    snapshot again (see below).
 16. Log to `TASKS.md`, commit & push, post summary to GitHub issue #13.
 
 Other scheduled tasks (Windows Task Scheduler): `MandsOzonQuotaTopup` (5am),
@@ -103,7 +115,19 @@ GitHub summary line includes `plan N/500 created`.
 summary (4am run state from `daily_run_status.json`, failed steps, new offers
 vs. plan, content, stock/campaigns/sales); it needs `TELEGRAM_BOT_TOKEN` /
 `TELEGRAM_CHAT_ID` in `.env`, otherwise it logs "Telegram not sent: not
-configured".
+configured". Since task #90 it also writes `overview_metrics.json`
+(gitignored, atomic, `"version": 1`: `built_at`, `campaigns` = live SKUs in
+campaigns + avg/min/max M&S cost ÷ action price %, `sales` = the last 34h,
+local midnight yesterday → run time: revenue, orders, units, SKUs, avg M&S
+cost %, small/regular warehouse %, brand %, top category). A failure there
+never stops the report; the GitHub/Telegram content is unchanged (24h).
+After `daily_report.py`, `run_daily_report.bat` runs `catalog_status.py`
+(read-only: live ids, stock, prices → `catalog_status.json`,
+`catalog_live_offer_ids.json`, `catalog_live_prices.json`) and then
+`account_snapshot.py`, all logged to the same `daily_report_YYYY-MM-DD.log`.
+The bat's exit code stays `daily_report.py`'s; the two refresh steps'
+failures are only logged. This uses the existing task, no new scheduled
+task.
 
 ## Ozon Sales app & daily plan (`planner_ui.pyw`, `daily_plan.py`)
 
@@ -112,13 +136,18 @@ configured".
 tkinter window with three tabs:
 
 - **Overview**: account snapshot from `account_snapshot.json` (built daily by
-  `account_snapshot.py`, pipeline step 15): KPI cards (Total SKUs, For sale,
-  Stock / Price up to date (24h), each split M&S / H&M / Other with its % of
-  total SKUs), Brands (SKUs / for sale), Warehouses (live SKUs, avg/min/max
+  `account_snapshot.py`, pipeline step 15, and rebuilt again by the 10am
+  `MandsOzonDailyReport` launcher after `catalog_status.py`): KPI cards
+  (Total SKUs, For sale, Stock / Price up to date (24h), each split
+  M&S / H&M / Other with its % of total SKUs), Brands (SKUs / for sale), Warehouses (live SKUs, avg/min/max
   live price in USD), a Campaigns card and a "Sales last 34 hours" card
-  (from the 10:00 report's metrics; warning colour past 26h, and "No
-  sales/campaign data yet" until it has run). Its Refresh runs `account_snapshot.py`,
-  which is offline and only writes that local file.
+  (from the 10:00 report's `overview_metrics.json`, copied in as
+  `campaigns` / `sales` / `metrics_built_at`; warning colour past 26h, and
+  "No sales/campaign data yet" until it has run), plus "data as of"
+  (warning past 26h) and any source that isn't ok. Products, articles,
+  unparsed, sizes and catalog freshness are no longer shown (snapshot v2).
+  Its Refresh runs `account_snapshot.py`, which is offline and only writes
+  that local file; fresh Ozon numbers arrive with the 10am job.
 - **Daily tasks**: `task_status.py` → `schtasks /query /fo CSV /v` +
   `daily_run_status.json`. View-only (see Task status below).
 - **Prioritization** (the app opens on this tab): the planner, i.e. the
