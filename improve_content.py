@@ -78,7 +78,9 @@ DAILY_CONTENT_GROUPS = 150
 CONTENT_UPDATE_SHARE = 0.5
 DEFAULT_MAX_MINUTES = 50
 
-ACTION_KEYS = ("photos", "video", "rich", "size_table", "attrs")
+ACTION_KEYS = ("photos", "video", "rich", "size_table", "attrs", "annotation")
+ATTR_ANNOTATION = 4191          # Ozon "Аннотация" (product description)
+ANNOTATION_MIN_CHARS = 500      # Ozon's text condition: annotation over 500 characters
 
 # Group statuses that start the cooldown.
 COOLDOWN_STATUSES = ("verified", "nothing_to_do")
@@ -257,6 +259,10 @@ def select_actions(rating_record, record, size_table_available, photo_default=TA
     attr_ids = improve_attribute_ids_from_rating(rating_record)
     if attr_ids:
         actions["attrs"] = attr_ids
+    unmet = {c.get("key") for g in (rating_record or {}).get("groups") or [] for c in g.get("unmet_conditions") or []}
+    current = cm.attr_value(record or {}, ATTR_ANNOTATION) or ""
+    if "text_annotation_500_chars" in unmet and len(str(current)) <= ANNOTATION_MIN_CHARS:
+        actions["annotation"] = True
     return actions
 
 
@@ -272,6 +278,8 @@ def describe_actions(actions, record=None):
         attrs = actions["attrs"]
         ids = sorted(attrs) if isinstance(attrs, dict) else attrs
         parts.append(f"attrs {list(ids)}")
+    if "annotation" in actions:
+        parts.append("longer description")
     return ", ".join(parts) or "nothing"
 
 
@@ -306,6 +314,7 @@ def build_offer_index(rows):
         info = groups.setdefault(key, {
             "key": key, "article": article, "color": color,
             "name": row.get("name") or "", "url": row.get("url") or "", "image_urls": [],
+            "specs_json": row.get("specs_json") or "",
         })
         if not info["image_urls"]:
             info["image_urls"] = cm.split_image_urls(row.get("image_urls"))
@@ -422,7 +431,8 @@ def format_done_line(stats, before_avg=None, after_avg=None):
         f"Done. {stats['groups']} groups / {stats['offers']} offers improved "
         f"(photos {stats['photos']}, videos {stats['video']}, rich {stats['rich']}, "
         f"size-table {stats['size_table']}, attrs {stats['attrs']}), "
-        f"{stats['failed']} failed, avg rating {_fmt_avg(before_avg)} -> {_fmt_avg(after_avg)} "
+        f"{stats['failed']} failed, longer descriptions {stats.get('annotation', 0)}, "
+        f"avg rating {_fmt_avg(before_avg)} -> {_fmt_avg(after_avg)} "
         f"(yesterday's batch)."
     )
 
@@ -477,6 +487,8 @@ def _checks_for(applied, item):
         checks.append(cm.check_attr_present(cm.ATTR_SIZE_TABLE))
     for attr_id in applied.get("attrs") or {}:
         checks.append(cm.check_attr_present(int(attr_id)))
+    if "annotation" in applied:
+        checks.append(cm.check_attr_present(ATTR_ANNOTATION))
     return checks
 
 
@@ -548,6 +560,29 @@ class GroupMedia:
                     self.notes.append(f"rich failed: {e}")
                     self._rich = None
         return self._rich
+
+    def long_annotation(self, record):
+        """600-1500 character description from on-file facts (content_text), once per group."""
+        if getattr(self, "_annotation", False) is False:
+            if self.dry_run:
+                self._annotation = "Проверка " * 70
+            else:
+                translation = _load_translation(self.group["article"])
+                if not translation:
+                    self.notes.append("annotation: no translation on file")
+                    self._annotation = None
+                else:
+                    try:
+                        from content_text import build_long_annotation
+                        text, err = build_long_annotation(record.get("name") or self.group.get("name"),
+                                                          translation, self.group.get("specs_json"))
+                        if err:
+                            self.notes.append(f"annotation: {err}")
+                        self._annotation = text
+                    except Exception as e:
+                        self.notes.append(f"annotation failed: {e}")
+                        self._annotation = None
+        return self._annotation
 
     def size_table(self):
         if self._size is False:
@@ -625,6 +660,11 @@ def build_offer_item(oid, actions, record, price_info, media, group, api_call):
             for k, v in suggested.items():
                 overrides.setdefault(k, v)
             applied["attrs"] = suggested
+    if actions.get("annotation"):
+        text = media.long_annotation(record)
+        if text:
+            overrides[ATTR_ANNOTATION] = text
+            applied["annotation"] = True
     if not applied:
         return None, {}
     item = cm.build_merged_import_item(record, price_info, attr_overrides=overrides,

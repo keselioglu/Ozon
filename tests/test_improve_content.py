@@ -171,9 +171,10 @@ def test_yesterday_batch_change_and_summary_line():
              "size_table": 5, "attrs": 6}
     line = ic.format_done_line(stats, before, after)
     assert line == ("Done. 3 groups / 7 offers improved (photos 2, videos 3, rich 4, size-table 5, "
-                    "attrs 6), 1 failed, avg rating 50.0 -> 75.0 (yesterday's batch).")
+                    "attrs 6), 1 failed, longer descriptions 0, avg rating 50.0 -> 75.0 (yesterday's batch).")
     assert re.match(r"^Done\. \d+ groups / \d+ offers improved \(photos \d+, videos \d+, rich \d+, "
-                    r"size-table \d+, attrs \d+\), \d+ failed, avg rating \S+ -> \S+ \(yesterday's batch\)\.$",
+                    r"size-table \d+, attrs \d+\), \d+ failed, longer descriptions \d+, avg rating \S+ -> \S+ "
+                    r"\(yesterday's batch\)\.$",
                     ic.format_done_line(ic.new_stats()))
 
 
