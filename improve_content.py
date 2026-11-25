@@ -863,6 +863,16 @@ def run(args, api_call=None, today=None, products_rows=None):
 
     groups = build_groups(snapshot, offer_to_group, group_info, live)
     try:
+        off_sale = cm.removed_from_sale([o for g in groups for o in g["offer_ids"]], api_call=api_call)
+    except Exception as e:
+        print(f"  ! status read failed ({e}) -- not filtering removed-from-sale listings")
+        off_sale = set()
+    if off_sale:
+        for g in groups:
+            g["offer_ids"] = [o for o in g["offer_ids"] if o not in off_sale]
+        groups = [g for g in groups if g["offer_ids"]]
+        print(f"{len(off_sale)} offer(s) are removed from sale on Ozon -- skipped")
+    try:
         stock = fetch_stock(sorted({o for g in groups for o in g["offer_ids"]}))
     except Exception as e:
         print(f"  ! stock read failed ({e}) -- ranking without stock priority")

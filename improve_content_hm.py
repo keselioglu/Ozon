@@ -263,6 +263,15 @@ def run(args, api_call=None, today=None):
     snapshot = hm_snapshot(args.snapshot, today)
     groups = build_groups(snapshot)
     try:
+        off_sale = cm.removed_from_sale([o for g in groups for o in g["offer_ids"]], api_call=api_call)
+    except Exception as e:
+        print(f"  ! status read failed ({e}) -- not filtering removed-from-sale listings")
+        off_sale = set()
+    for g in groups:
+        g["offer_ids"] = [o for o in g["offer_ids"] if o not in off_sale]
+    groups = [g for g in groups if g["offer_ids"]]
+    print(f"{len(off_sale)} H&M offer(s) are removed from sale on Ozon -- skipped")
+    try:
         from margin_pricing import get_real_stock
         stock = get_real_stock(sorted({o for g in groups for o in g["offer_ids"]}))
     except Exception as e:

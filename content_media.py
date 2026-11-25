@@ -346,6 +346,23 @@ def fetch_attributes(offer_ids, api_call=None):
     return records
 
 
+REMOVED_FROM_SALE = "Убран из продажи"
+
+
+def removed_from_sale(offer_ids, api_call=None):
+    """offer_ids Ozon shows as 'Убран из продажи' (taken off sale -- e.g. 329 H&M listings on
+    2026-11-25, before any content push). The content jobs skip them: improving a listing that
+    isn't on sale spends daily_update quota for nothing."""
+    call = _api(api_call)
+    out = set()
+    ids = list(offer_ids)
+    for i in range(0, len(ids), 1000):
+        for x in call("/v3/product/info/list", {"offer_id": ids[i:i + 1000]}).get("items", []):
+            if (x.get("statuses") or {}).get("status_description") == REMOVED_FROM_SALE:
+                out.add(x.get("offer_id"))
+    return out
+
+
 def fetch_prices(offer_ids, api_call=None):
     """offer_id -> {"price", "currency_code", "vat"} (strings), from
     /v5/product/info/prices."""

@@ -399,7 +399,7 @@ def test_dry_run_makes_no_write_calls(env, monkeypatch, capsys):
     stats = ic.run(env["args"]("--dry-run"), api_call=api, today=TODAY, products_rows=ROWS)
 
     assert "/v3/product/import" not in api.calls
-    assert set(api.calls) <= {"/v4/product/info/limit", "/v3/product/list",
+    assert set(api.calls) <= {"/v4/product/info/limit", "/v3/product/list", "/v3/product/info/list",
                               "/v4/product/info/attributes", "/v5/product/info/prices"}
     assert not env["log"].exists()
     out = capsys.readouterr().out
