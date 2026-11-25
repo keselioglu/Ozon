@@ -73,10 +73,15 @@ never in a database.
     detects (log-only) any campaign product Ozon added itself
     (`add_mode != "MANUAL"`) rather than through step 9. See note below.
 15. **Account snapshot** (`account_snapshot.py`, 600s timeout) — read-only,
-    offline: rebuilds `account_snapshot.json` (the Ozon Sales app's Overview
-    data: per-brand offers / for sale / products / articles / sizes / offers
-    by warehouse) from `catalog_status.json`, `catalog_live_offer_ids.json`
-    and `warehouse_assignments.json`. It never fails the run: a failure or
+    offline: rebuilds `account_snapshot.json` (version 2, the Ozon Sales
+    app's Overview data: per-brand offers / for sale / stock and price "up
+    to date" in the last 24h, per-warehouse SKU counts with avg/min/max live
+    price, and the campaigns/sales blocks copied from `overview_metrics.json`)
+    from `catalog_status.json`, `catalog_live_offer_ids.json`,
+    `catalog_live_prices.json`, `warehouse_assignments.json`,
+    `stock_update_history.jsonl`, `price_update_history.jsonl` and
+    `hm_stock_last_run.json`. H&M/Other price "up to date" is 0 (no price
+    run exists). It never fails the run: a failure or
     timeout is an attention line, and the Daily tasks tab shows it as a
     warning. `catalog_status.json` itself is refreshed by `catalog_status.py`
     (the app's button), not by daily_run, so the snapshot is only as fresh

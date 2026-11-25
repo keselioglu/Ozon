@@ -62,9 +62,9 @@ def test_kpi_cards_values_and_split():
     assert offers["split"] == [("M&S", "12,838"), ("H&M", "1,273"), ("Other", "0")]
     assert offers["sub"] == "M&S 12,838 · H&M 1,273 · Other 0"
     assert cards[1]["value"] == "6,553"
-    # products = (article, color): T611234/Black, T611234/Navy, T619999/Red
-    assert cards[2]["value"] == "3" and cards[2]["split"][0] == ("M&S", "3")
-    assert cards[3]["value"] == "2"
+    # snapshot v2 no longer has products/articles: the cards show "—", not a guess
+    assert cards[2]["value"] == "—" and cards[2]["split"][0] == ("M&S", "—")
+    assert cards[3]["value"] == "—"
     assert cards[2]["note"] and cards[3]["note"]
 
 
@@ -87,9 +87,10 @@ def test_brand_rows_include_total():
     rows = ui.brand_rows(_snapshot())
     assert [r["brand"] for r in rows] == ["M&S", "H&M", "Other", "Total"]
     ms, total = rows[0], rows[-1]
-    assert ms["offers"] == 12838 and ms["unparsed"] == 1 and ms["sizes_count"] == 3
-    assert rows[1]["unparsed"] == 2 and rows[1]["products"] == 0
-    assert total["offers"] == 14111 and total["unparsed"] == 3 and total["sizes_count"] == 3
+    # snapshot v2 dropped products/articles/unparsed/sizes -> None in the rows
+    assert ms["offers"] == 12838 and ms["unparsed"] is None and ms["sizes_count"] is None
+    assert rows[1]["unparsed"] is None and rows[1]["products"] is None
+    assert total["offers"] == 14111 and total["unparsed"] is None and total["sizes_count"] is None
     assert ui.brand_rows(NULL_SNAP)[1]["sizes_count"] is None
 
 
@@ -144,8 +145,9 @@ def test_size_rows_bad_input_and_default_top_n():
 
 
 def test_size_rows_from_snapshot_total():
-    rows, hidden = ui.size_rows(_snapshot()["total"]["sizes"])
-    assert rows == [("M", 3), ("L", 1), ("XL", 1)] and hidden == 0
+    # snapshot v2 has no sizes: the size table is empty, not an error
+    assert "sizes" not in _snapshot()["total"]
+    assert ui.size_rows(_snapshot()["total"].get("sizes")) == ([], 0)
 
 
 # --- staleness -----------------------------------------------------------------
