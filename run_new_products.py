@@ -51,6 +51,7 @@ HISTORY_FILE = "new_products_history.jsonl"
 DRYRUN_FILE = "new_products_dryrun.json"
 LOCK_FILE = "new_products.lock"
 OVERSHOOT = 1.5            # look at this many more offers than needed (checks drop some)
+MS_OVERSHOOT = 3.0         # M&S loses more at build (already on Ozon, unmapped size/colour)
 MAX_MS_PAGES_PER_LABEL = 60  # product pages fetched per M&S category at most
 HM_PAGES_PER_SECTION = 6   # listing pages (36 products each) read per H&M section at most
 IMPORT_WAIT_S = 900
@@ -124,7 +125,10 @@ def ms_sections(label):
         secs = [{"name": r.get("Category Name (TR)"), "url": r.get("Full URL"), "priority": r.get("Proprity")}
                 for r in cp.load_priority_categories() if cp.is_supported_category(r.get("Category Name (TR)"), r.get("Full URL"))
                 and daily_plan.category_label_for_name(r.get("Category Name (TR)")) == label]
-    return sorted(secs, key=lambda s: float(s.get("priority") or 9999))
+    # Sections named after the category first (e.g. "Bluz" before a T-shirt section that happens
+    # to hold a few blouses), then by priority.
+    return sorted(secs, key=lambda s: (daily_plan.category_label_for_name(s.get("name") or "") != label,
+                                       float(s.get("priority") or 9999)))
 
 
 def ms_candidates(labels, want, remaining, report):
@@ -138,7 +142,7 @@ def ms_candidates(labels, want, remaining, report):
     seen = set(crawler.load_line_set("product_urls.txt"))  # already queued/crawled -> same as daily discovery
     out = {}
     for label in labels:
-        goal = needed("M&S", label, want, remaining) * OVERSHOOT
+        goal = needed("M&S", label, want, remaining) * MS_OVERSHOOT
         got, fetched, picked = 0, 0, []
         for sec in ms_sections(label):
             if got >= goal or fetched >= MAX_MS_PAGES_PER_LABEL:
@@ -146,8 +150,8 @@ def ms_candidates(labels, want, remaining, report):
             log(f"  M&S {label}: section {sec.get('name')} ({sec.get('url')})")
             for item in cp.iter_new_products_in_category(sec["url"], live, seen):
                 seen.add(item["url"])
-                fetched += 1
                 if daily_plan.category_label_for_name(item["name"]) == label and item["offers"] > 0:
+                    fetched += 1  # only real product-page fetches count; the name check is free
                     rows = crawler.extract_product(item["url"]) or []
                     if any((r.get("stock_count") or 0) > 0 for r in rows):
                         picked.append({"url": item["url"], "name": item["name"], "rows": rows})
