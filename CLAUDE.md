@@ -149,7 +149,10 @@ tkinter window with three tabs:
   Its Refresh runs `account_snapshot.py`, which is offline and only writes
   that local file; fresh Ozon numbers arrive with the 10am job.
 - **Daily tasks**: `task_status.py` → `schtasks /query /fo CSV /v` +
-  `daily_run_status.json`. View-only (see Task status below).
+  `daily_run_status.json` + the run-history files. One scrollable card per
+  scheduled task (display names: "MS stock update", "H&M stock update",
+  "Price update"), each with next/last run, result and six counts from
+  its latest run. View-only (see Task status below).
 - **Prioritization** (the app opens on this tab): the planner, i.e. the
   `daily_plan.json` editor plus quota / plan / pool per brand × category
   from `category_inventory.json`, `catalog_status.json` and the live
@@ -245,6 +248,39 @@ only button is Refresh, it re-collects every 60s on a worker thread (never
 two collects at once), and it shows a `recheck_stockouts` timeout as a
 warning, not a failure, and an `account_snapshot` failure or timeout as a
 warning too (every other step failure/timeout is critical).
+
+**Per-task sections** (task #99). `collect_status()` also returns
+`task_metrics` (`load_task_metrics()`, from the last valid line of each
+run-history file). `planner_ui.build_task_sections()` (pure, Tk-free, never
+raises) turns these into one card per scheduled task, in the same order as
+`build_task_rows`. Each card shows six metrics in this fixed order: URLs
+checked, Prices checked, SKU prices updated, Campaign limit prices updated,
+SKU stock checked, SKU stock updated. Sources (`TASK_METRIC_KEYS`):
+- `OzonSales_DailyStockUpdate`: `stock_update_history.jsonl` (written by
+  `refresh_live_stock.py`): `pages_checked`, `products_checked`,
+  `comparison.increased + decreased`. The 4am `daily_run.py` also runs this
+  script, so the card shows the latest M&S stock run, whichever task ran it.
+- `OzonSales_DailyHMStockUpdate`: `hm_stock_update_history.jsonl`:
+  `products_read`, `offers_live`, `stock_changed`.
+- `OzonSales_DailyPriceUpdate`: `price_refresh_history.jsonl` (gitignored,
+  one line per `refresh_prices.py` run: `urls_checked`, `urls_failed`,
+  `prices_checked`, `prices_changed`) plus `price_update_history.jsonl`
+  (`daily_price_update.py`). The "updated" counts come from the record's
+  newer `price_changed_ok` / `limit_changed_ok` keys: offers Ozon accepted
+  whose price / `min_price` really changed. They are not `pushed_ok`,
+  because every SKU is re-pushed daily. An external dashboard reads
+  `price_update_history.jsonl`, so only add keys there; never rename or
+  remove them.
+
+A metric that doesn't apply to a task, or one that has no value (e.g. an
+older record), shows `—`. MandsOzon* tasks and unmapped tasks get all `—`.
+If a record isn't from today, the card keeps its counts and adds a warning
+note: "counts from YYYY-MM-DD (latest run not recorded)". For the price
+task, the date is the older of the refresh and update dates. The friendly
+names come from `planner_ui.TASK_DISPLAY_NAMES` / `task_display_name()`
+(case-insensitive; unknown names pass through). They change the display
+only. The Task Scheduler tasks themselves are NOT renamed, and the raw name
+stays in each row's `task_name`.
 
 ## Category/type mapping (`ozon_mapping.py`)
 

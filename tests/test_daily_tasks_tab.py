@@ -78,14 +78,15 @@ def _status(**dr_kw):
 
 
 def _levels(rows):
-    return {r["name"]: r["level"] for r in rows}
+    return {r["task_name"]: r["level"] for r in rows}
 
 
 def test_import_still_tk_free():
     assert "tkinter" not in ui.__dict__
     for fn in ("task_result_level", "parse_task_time", "task_is_stale", "build_task_rows",
                "step_level", "build_step_rows", "build_run_summary", "attention_items",
-               "stale_banner", "error_lines", "level_color"):
+               "stale_banner", "error_lines", "level_color", "task_display_name",
+               "build_task_sections"):
         assert callable(getattr(ui, fn))
 
 
@@ -99,7 +100,9 @@ def test_task_levels_from_fixture():
     assert lv["MandsOzonOddTime"] == "good"  # unparseable time is never stale
     for r in rows:
         assert r["tag"] == r["level"]
-        assert set(r) == {"name", "next_run", "last_run", "result", "status", "level", "tag"}
+        assert set(r) == {"name", "task_name", "next_run", "last_run", "result", "status", "level", "tag"}
+    hm = next(r for r in rows if r["task_name"] == "OzonSales_DailyHMStockUpdate")
+    assert hm["name"] == "H&M stock update"
     never = next(r for r in rows if r["name"] == "MandsOzonDailyReport")
     assert never["last_run"] == "never"
     odd = next(r for r in rows if r["name"] == "MandsOzonOddTime")
@@ -108,7 +111,7 @@ def test_task_levels_from_fixture():
 
 def test_task_rows_sorted_by_next_run_then_name():
     names = [r["name"] for r in ui.build_task_rows(_status(), now=NOW)]
-    assert names == ["MandsOzonDailyReport", "MandsOzonDailyRun", "OzonSales_DailyHMStockUpdate",
+    assert names == ["MandsOzonDailyReport", "MandsOzonDailyRun", "H&M stock update",
                      "MandsOzonQuotaFill", "MandsOzonOddTime"]
 
 
@@ -478,7 +481,9 @@ def test_daily_tab_renders_in_real_tk():
         frame = tkinter.Frame(root, bg=ui.BG)
         tab = ui.DailyTasksTab(App(), frame)
         tab._apply(_status(is_today=False, stale=True, date="2026-11-23"))
-        assert len(tab.jobs.get_children()) == 5
+        cards = tab.sections.winfo_children()
+        assert len(cards) == 5
+        assert cards[2].winfo_children()[0].cget("text") == "H&M stock update"
         assert len(tab.steps.get_children()) == 4
         assert tab.banner.winfo_manager() == "pack"
         assert tab.errors.winfo_manager() == "pack"
@@ -508,3 +513,127 @@ def test_account_snapshot_step_is_warning_only():
     assert ui.step_level({"script": "account_snapshot.py", "status": "ok"}) == "good"
     assert ui.step_level({"script": "upload_to_ozon.py", "status": "failed"}) == "critical"
     assert ui.step_level({"script": "crawler.py", "status": "timeout"}) == "critical"
+
+
+# --- task display names + per-task sections (task #102) ---------------------------
+
+LABELS = ["URLs checked", "Prices checked", "SKU prices updated", "Campaign limit prices updated",
+          "SKU stock checked", "SKU stock updated"]
+
+
+def test_task_display_name():
+    assert ui.task_display_name("OzonSales_DailyStockUpdate") == "MS stock update"
+    assert ui.task_display_name("ozonsales_dailystockupdate") == "MS stock update"
+    assert ui.task_display_name("\\OzonSales_DAILYStockUpdate") == "MS stock update"
+    assert ui.task_display_name("OzonSales_DailyHMStockUpdate") == "H&M stock update"
+    assert ui.task_display_name("OzonSales_DailyPriceUpdate") == "Price update"
+    assert ui.task_display_name("MandsOzonDailyRun") == "MandsOzonDailyRun"
+    assert ui.task_display_name("Something Else") == "Something Else"
+    assert ui.task_display_name(None) == ""
+
+
+def test_build_task_rows_uses_display_name():
+    rows = ui.build_task_rows({"tasks": [_task("OzonSales_DailyStockUpdate")]}, now=NOW)
+    assert rows[0]["name"] == "MS stock update"
+    assert rows[0]["task_name"] == "OzonSales_DailyStockUpdate"
+
+
+def _blank(**kw):
+    m = {k: None for k in ("urls_checked", "prices_checked", "sku_price_updated",
+                           "campaign_limit_updated", "sku_stock_checked", "sku_stock_updated")}
+    m.update(kw)
+    return m
+
+
+def _section_status(metrics):
+    return {"today": "2026-11-25",
+            "tasks": [_task("OzonSales_DailyStockUpdate", next_run="11/26/2026 1:00:00 AM"),
+                      _task("OzonSales_DailyHMStockUpdate", next_run="11/26/2026 2:00:00 AM"),
+                      _task("OzonSales_DailyPriceUpdate", next_run="11/26/2026 5:00:00 AM"),
+                      _task("MandsOzonDailyRun", next_run="11/26/2026 4:00:00 AM")],
+            "task_metrics": metrics}
+
+
+METRICS = {
+    "ms_stock": _blank(date="2026-11-25", urls_checked=2254, sku_stock_checked=12838,
+                       sku_stock_updated=1760, prices_checked=99),
+    "hm_stock": _blank(date="2026-11-25", urls_checked=300, sku_stock_checked=1500,
+                       sku_stock_updated=40),
+    "price": _blank(refresh_date="2026-11-25", update_date="2026-11-25", urls_checked=2100,
+                    prices_checked=12000, sku_price_updated=350, campaign_limit_updated=120,
+                    sku_stock_checked=5),
+}
+
+
+def test_sections_six_metrics_in_fixed_order():
+    secs = ui.build_task_sections(_section_status(METRICS), now=NOW)
+    assert [s["title"] for s in secs] == ["MS stock update", "H&M stock update",
+                                          "MandsOzonDailyRun", "Price update"]
+    assert [s["title"] for s in secs] == [r["name"] for r in
+                                          ui.build_task_rows(_section_status(METRICS), now=NOW)]
+    for s in secs:
+        assert [m[0] for m in s["metrics"]] == LABELS
+        assert set(s) >= {"title", "task_name", "next_run", "last_run", "result", "level",
+                          "metrics", "note"}
+        assert s["note"] is None
+
+
+def test_ms_stock_section_values():
+    ms = ui.build_task_sections(_section_status(METRICS), now=NOW)[0]
+    assert ms["task_name"] == "OzonSales_DailyStockUpdate"
+    vals = {lbl: (v, lv) for lbl, v, lv in ms["metrics"]}
+    assert vals["URLs checked"][0] == "2,254"
+    assert vals["SKU stock checked"][0] == "12,838"
+    assert vals["SKU stock updated"][0] == "1,760"
+    for lbl in ("Prices checked", "SKU prices updated", "Campaign limit prices updated"):
+        assert vals[lbl] == ("—", "muted")  # not applicable, even when the record has a value
+
+
+def test_price_section_values():
+    price = next(s for s in ui.build_task_sections(_section_status(METRICS), now=NOW)
+                 if s["title"] == "Price update")
+    vals = {lbl: v for lbl, v, _ in price["metrics"]}
+    assert vals == {"URLs checked": "2,100", "Prices checked": "12,000", "SKU prices updated": "350",
+                    "Campaign limit prices updated": "120", "SKU stock checked": "—",
+                    "SKU stock updated": "—"}
+
+
+def test_mandsozon_and_none_values_are_dash():
+    m = dict(METRICS, ms_stock=_blank(date="2026-11-25", urls_checked=10))
+    secs = ui.build_task_sections(_section_status(m), now=NOW)
+    run = next(s for s in secs if s["task_name"] == "MandsOzonDailyRun")
+    assert all(v == "—" and lv == "muted" for _, v, lv in run["metrics"])
+    assert run["note"] is None
+    ms = secs[0]
+    assert [v for _, v, _ in ms["metrics"]] == ["10", "—", "—", "—", "—", "—"]
+
+
+def test_old_record_gives_warning_note():
+    m = dict(METRICS, ms_stock=dict(METRICS["ms_stock"], date="2026-11-24"),
+             price=dict(METRICS["price"], refresh_date="2026-11-23", update_date="2026-11-24"))
+    secs = ui.build_task_sections(_section_status(m), now=NOW)
+    assert secs[0]["note"] == "counts from 2026-11-24 (latest run not recorded)"
+    assert secs[0]["note_level"] == "warning"
+    assert secs[1]["note"] is None
+    price = next(s for s in secs if s["title"] == "Price update")
+    assert price["note"] == "counts from 2026-11-23 (latest run not recorded)"
+    assert price["metrics"][0][1] == "2,100"  # older counts are still shown
+
+
+@pytest.mark.parametrize("garbage", [None, {}, [], "x", 5, {"ms_stock": "bad"},
+                                     {"price": None, "ms_stock": [1, 2]},
+                                     {"ms_stock": {"urls_checked": "lots", "date": 7}}])
+def test_garbage_task_metrics_never_raises(garbage):
+    secs = ui.build_task_sections(_section_status(garbage), now=NOW)
+    assert len(secs) == 4
+    for s in secs:
+        assert [m[0] for m in s["metrics"]] == LABELS
+        assert all(v == "—" for _, v, _ in s["metrics"])
+
+
+@pytest.mark.parametrize("status", [None, "x", {"tasks": "bad"}, {"tasks": [None, 5]}])
+def test_sections_garbage_status(status):
+    secs = ui.build_task_sections(status, now=NOW)
+    assert isinstance(secs, list)
+    for s in secs:
+        assert len(s["metrics"]) == 6

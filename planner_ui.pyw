@@ -12,7 +12,9 @@ Tabs, in order:
     (warning colour when older than 26h) and any source that isn't ok.
     Refresh runs account_snapshot.py (offline) and reloads.
   * Daily tasks -- view-only status (DailyTasksTab): scheduled MandsOzon* /
-    OzonSales_* tasks (next run, last run, coloured result), the latest
+    OzonSales_* tasks, one scrollable card per task (build_task_sections:
+    display name via TASK_DISPLAY_NAMES, next run, last run, coloured result
+    and six metrics from task_status' task_metrics), the latest
     daily_run card with its per-step list, a stale banner when
     daily_run_status.json isn't today's, and collect errors. Data comes from
     task_status.collect_status() on a worker thread; Refresh (the only
@@ -563,6 +565,26 @@ def task_result_level(task, now=None):
     return "warning"
 
 
+# Display-only names for the Daily tasks tab (matched case-insensitively on the
+# task's short name). The Task Scheduler tasks themselves are NOT renamed.
+TASK_DISPLAY_NAMES = {
+    "OzonSales_DailyStockUpdate": "MS stock update",
+    "OzonSales_DailyHMStockUpdate": "H&M stock update",
+    "OzonSales_DailyPriceUpdate": "Price update",
+}
+_TASK_DISPLAY_FOLDED = {k.casefold(): v for k, v in TASK_DISPLAY_NAMES.items()}
+
+
+def task_display_name(name):
+    """Friendly name for a scheduled task (short name or full path); unknown
+    names come back unchanged."""
+    raw = _text(name)
+    if not raw:
+        return raw
+    short = raw.replace("/", "\\").rstrip("\\").split("\\")[-1].strip()
+    return _TASK_DISPLAY_FOLDED.get(short.casefold(), raw)
+
+
 def build_task_rows(status, now=None):
     """One row per status['tasks'] entry, sorted by next_run (parsed) then name."""
     try:
@@ -575,8 +597,10 @@ def build_task_rows(status, now=None):
             result = _text(t.get("last_result_text")) or "unknown"
             if task_is_stale(t, now):
                 result += " (stale)"
+            raw_name = _text(t.get("name"))
             rows.append({
-                "name": _text(t.get("name")) or "?",
+                "name": task_display_name(raw_name) or "?",
+                "task_name": raw_name,
                 "next_run": _text(t.get("next_run")) or DASH,
                 "last_run": _text(t.get("last_run")) or "never",
                 "result": result,
@@ -589,6 +613,78 @@ def build_task_rows(status, now=None):
         for r in rows:
             r.pop("_next", None)
         return rows
+    except Exception:
+        return []
+
+
+# Per-task section metrics: (label, task_status metric field), fixed order.
+TASK_SECTION_METRICS = (
+    ("URLs checked", "urls_checked"),
+    ("Prices checked", "prices_checked"),
+    ("SKU prices updated", "sku_price_updated"),
+    ("Campaign limit prices updated", "campaign_limit_updated"),
+    ("SKU stock checked", "sku_stock_checked"),
+    ("SKU stock updated", "sku_stock_updated"),
+)
+# task_metrics key -> the fields that apply to it (everything else shows '—').
+TASK_METRIC_APPLIES = {
+    "ms_stock": ("urls_checked", "sku_stock_checked", "sku_stock_updated"),
+    "hm_stock": ("urls_checked", "sku_stock_checked", "sku_stock_updated"),
+    "price": ("urls_checked", "prices_checked", "sku_price_updated", "campaign_limit_updated"),
+}
+
+
+def _metric_date(key, entry):
+    """Date ('YYYY-MM-DD') the counts are from; for 'price' the older of the
+    refresh and update dates. None when unknown."""
+    names = ("refresh_date", "update_date") if key == "price" else ("date",)
+    dates = [d[:10] for d in (_text(entry.get(n)) for n in names) if d]
+    return min(dates) if dates else None
+
+
+def _metric_key(name):
+    try:
+        return task_status.metric_key_for_task(name)
+    except Exception:
+        return None
+
+
+def build_task_sections(status, now=None):
+    """One section per status['tasks'] entry (build_task_rows order):
+    {title, task_name, next_run, last_run, result, level,
+     metrics: [(label, value_text, level)] x6, note}. Pure, never raises."""
+    try:
+        st = _as_dict(status)
+        all_metrics = _as_dict(st.get("task_metrics"))
+        today = _text(st.get("today"))[:10]
+        sections = []
+        for row in build_task_rows(st, now):
+            key = _metric_key(row.get("task_name"))
+            entry = _as_dict(all_metrics.get(key)) if key in TASK_METRIC_APPLIES else {}
+            applies = TASK_METRIC_APPLIES.get(key, ()) if entry else ()
+            metrics = []
+            for label, field in TASK_SECTION_METRICS:
+                value = entry.get(field) if field in applies else None
+                text = fmt_num(value)
+                metrics.append((label, text, "muted" if text == DASH else "good"))
+            note, note_level = None, None
+            if entry:
+                when = _metric_date(key, entry)
+                if when and today and when != today:
+                    note = f"counts from {when} (latest run not recorded)"
+                    note_level = "warning"
+            sections.append({
+                "title": row.get("name") or "?",
+                "task_name": row.get("task_name") or "",
+                "next_run": row.get("next_run") or DASH,
+                "last_run": row.get("last_run") or "never",
+                "result": row.get("result") or "unknown",
+                "level": row.get("level") or "warning",
+                "metrics": metrics,
+                "note": note,
+                "note_level": note_level,
+            })
+        return sections
     except Exception:
         return []
 
@@ -1103,8 +1199,6 @@ class _WidgetHelpers:
                               bd=0, cursor="hand2", disabledforeground=DIM)
 
 
-JOB_COLUMNS = (("name", "Task", 260), ("next_run", "Schedule / next run", 190),
-               ("last_run", "Last run", 190), ("result", "Result", 260), ("status", "Status", 110))
 STEP_COLUMNS = (("name", "Step", 420), ("result", "Result", 260), ("seconds", "Duration", 120))
 DAILY_FOOTNOTE = "View only — scheduled tasks are managed in Windows Task Scheduler."
 
@@ -1135,13 +1229,30 @@ class DailyTasksTab(_WidgetHelpers):
         self.collected_label = self.label(head, f"collected {DASH}", 9, MUTED)
         self.collected_label.pack(side="right", padx=(0, 10))
 
-        # packed (before the jobs table) only while stale_banner() has text
+        # packed (before the task sections) only while stale_banner() has text
         self.banner = tk.Label(outer, text="", bg=STATUS["warning"], fg=BG, font=(FONT, 9, "bold"),
                                anchor="w", padx=8, pady=4)
 
-        self.jobs_wrap = tk.Frame(outer, bg=BG)
-        self.jobs_wrap.pack(fill="both", expand=True, pady=(10, 0))
-        self.jobs = self._tree(self.jobs_wrap, JOB_COLUMNS, 8)
+        # one card per scheduled task (build_task_sections), vertically scrollable
+        self.sections_wrap = tk.Frame(outer, bg=BG)
+        self.sections_wrap.pack(fill="both", expand=True, pady=(10, 0))
+        self.sections_canvas = tk.Canvas(self.sections_wrap, bg=BG, highlightthickness=0, bd=0,
+                                         height=self.px(300))
+        sb = self.ttk.Scrollbar(self.sections_wrap, orient="vertical",
+                                command=self.sections_canvas.yview)
+        self.sections_canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.sections_canvas.pack(side="left", fill="both", expand=True)
+        self.sections = tk.Frame(self.sections_canvas, bg=BG)
+        self._sections_win = self.sections_canvas.create_window((0, 0), window=self.sections,
+                                                                anchor="nw")
+        self.sections.bind("<Configure>", lambda e: self.sections_canvas.configure(
+            scrollregion=self.sections_canvas.bbox("all")))
+        self.sections_canvas.bind("<Configure>", lambda e: self.sections_canvas.itemconfigure(
+            self._sections_win, width=e.width))
+        self.sections_canvas.bind("<Enter>", lambda e: self.sections_canvas.bind_all(
+            "<MouseWheel>", self._on_wheel))
+        self.sections_canvas.bind("<Leave>", lambda e: self.sections_canvas.unbind_all("<MouseWheel>"))
 
         card = tk.Frame(outer, bg=CARD, padx=10, pady=8)
         card.pack(fill="x", pady=(10, 0))
@@ -1175,6 +1286,34 @@ class DailyTasksTab(_WidgetHelpers):
         tree.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
         return tree
+
+    def _on_wheel(self, event):
+        try:
+            self.sections_canvas.yview_scroll(int(-event.delta / 120) or (-1 if event.delta > 0 else 1),
+                                              "units")
+        except Exception:
+            pass
+
+    def _render_sections(self, status):
+        for w in self.sections.winfo_children():
+            w.destroy()
+        for sec in build_task_sections(status):
+            card = self.tk.Frame(self.sections, bg=CARD, padx=10, pady=8)
+            card.pack(fill="x", pady=(0, 8))
+            self.label(card, sec["title"], 11, level_color(sec["level"]), True).pack(anchor="w")
+            self.label(card, f"next run {sec['next_run']} · last run {sec['last_run']} · "
+                             f"result {sec['result']}", 9, MUTED).pack(anchor="w", pady=(2, 0))
+            grid = self.tk.Frame(card, bg=CARD)
+            grid.pack(fill="x", pady=(4, 0))
+            for i, (lbl, value, level) in enumerate(sec["metrics"]):
+                r, c = divmod(i, 3)
+                self.label(grid, lbl, 8, MUTED).grid(row=r * 2, column=c, sticky="w", padx=(0, 24))
+                self.label(grid, value, 10, level_color(level), True).grid(
+                    row=r * 2 + 1, column=c, sticky="w", padx=(0, 24))
+            if sec.get("note"):
+                self.label(card, sec["note"], 9, level_color(sec.get("note_level") or "warning")
+                           ).pack(anchor="w", pady=(4, 0))
+        self.sections_canvas.yview_moveto(0)
 
     # ---------- refresh (worker thread -> app.post -> UI thread) ----------
     def _cancel_timer(self):
@@ -1221,13 +1360,11 @@ class DailyTasksTab(_WidgetHelpers):
         banner = stale_banner(status)
         if banner:
             self.banner.configure(text=banner)
-            self.banner.pack(fill="x", pady=(8, 0), before=self.jobs_wrap)
+            self.banner.pack(fill="x", pady=(8, 0), before=self.sections_wrap)
         else:
             self.banner.pack_forget()
 
-        self.jobs.delete(*self.jobs.get_children())
-        for row in build_task_rows(status):
-            self.jobs.insert("", "end", values=[row[k] for k, _, _ in JOB_COLUMNS], tags=(row["level"],))
+        self._render_sections(status)
 
         dr = _as_dict(_as_dict(status).get("daily_run"))
         for w in self.summary.winfo_children():
