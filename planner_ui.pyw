@@ -99,6 +99,7 @@ import new_sources  # noqa: E402  (offline: local JSON + TASKS.md; never fetches
 import task_status  # noqa: E402  (read-only: local JSON + a scheduler query, never changes a task)
 
 INVENTORY_FILE = "category_inventory.json"
+HM_INVENTORY_FILE = "hm_inventory.json"
 CATALOG_STATUS_FILE = "catalog_status.json"
 DEFERRED_FILE = "deferred_items.json"
 NEW_ITEMS_LOG = "new_items_submitted.json"
@@ -212,11 +213,13 @@ def days_of_supply(pool, allocation):
     return round(pool / allocation, 1)
 
 
-def build_rows(inventory, catalog_status, plan_day, created):
+def build_rows(inventory, catalog_status, plan_day, created, hm_inventory=None, hm_created=None):
     """Table rows for one plan day. inventory: category_inventory.json dict
     (or None); catalog_status: catalog_status.json dict (or None); plan_day:
     {"total", "allocations", "fill_remainder"}; created: created_from_history()
-    shape. M&S gets one row per daily_plan category; H&M one read-only row."""
+    shape; hm_inventory: hm_inventory.json (or None); hm_created: {label: n}
+    created today for H&M. One editable row per daily_plan category for each
+    brand (H&M add pipeline since 2026-11-25: run_new_products.py)."""
     created = created or {}
     allocs = ((plan_day or {}).get("allocations") or {})
     brands = (inventory or {}).get("brands") or {}
@@ -239,20 +242,27 @@ def build_rows(inventory, catalog_status, plan_day, created):
         row["days_of_supply"] = days_of_supply(row["pool"], row["allocation"])
         rows.append(row)
 
-    hm_status = ((catalog_status or {}).get("brands") or {}).get(HM) or {}
-    hm_inv = brands.get(HM) or {}
-    hm_live = hm_status.get("live", hm_inv.get("live"))
-    rows.append({
-        "brand": HM, "category": "(all)", "live": hm_live,
-        "crawled_not_live": None, "deferred": None, "discovered_est": None,
-        "created_today": None, "created_7d": None, "allocation": None,
-        "pool": None, "days_of_supply": None, "editable": False, "note": HM_NOTE,
-    })
+    hm_counts = (hm_inventory or {}).get("counts") or {}
+    hm_created = hm_created or {}
+    for label in daily_plan.CATEGORY_LABELS.values():
+        c = hm_counts.get(label) or {}
+        row = {
+            "brand": HM, "category": label,
+            "live": None,  # Ozon doesn't tell us an H&M offer's category without a full attribute read
+            "crawled_not_live": None, "deferred": None,
+            "discovered_est": c.get("offers", 0) if hm_inventory else None,
+            "created_today": hm_created.get(label, 0), "created_7d": None,
+            "allocation": (allocs.get(HM) or {}).get(label, 0),
+            "editable": True, "note": "",
+        }
+        row["pool"] = pool_size(row)
+        row["days_of_supply"] = days_of_supply(row["pool"], row["allocation"])
+        rows.append(row)
     return rows
 
 
 def is_editable(row):
-    return bool(row and row.get("editable")) and row.get("brand") == MS
+    return bool(row and row.get("editable"))
 
 
 def fmt_cell(key, row):
@@ -354,9 +364,9 @@ def clear_override(plan, key):
 
 
 def set_allocation(day, brand, label, n):
-    """New day with allocation[brand][label] = n. Only M&S is editable."""
-    if brand != MS:
-        raise ValueError(f"{brand} has {HM_NOTE} -- its allocation can't be edited")
+    """New day with allocation[brand][label] = n (M&S or H&M)."""
+    if brand not in (MS, HM):
+        raise ValueError(f"unknown brand {brand!r}")
     if not isinstance(n, int) or isinstance(n, bool) or n < 0:
         raise ValueError(f"allocation must be an int >= 0 (got {n!r})")
     out = copy.deepcopy(day)
@@ -396,9 +406,17 @@ def by_pool_size(total, pools):
 
 
 def apply_helper(day, allocations):
-    """New day whose M&S allocations are replaced by `allocations`."""
+    """New day whose allocations are replaced by `allocations`: {label: n} (M&S, the old
+    shape) or {(brand, label): n} (both brands)."""
     out = copy.deepcopy(day)
-    out.setdefault("allocations", {})[MS] = dict(allocations)
+    allocs = out.setdefault("allocations", {})
+    if all(isinstance(k, tuple) for k in allocations):
+        for brand in {b for b, _ in allocations}:
+            allocs[brand] = {}
+        for (brand, label), n in allocations.items():
+            allocs[brand][label] = n
+    else:
+        allocs[MS] = dict(allocations)
     return out
 
 
@@ -421,9 +439,10 @@ NP_PLAN_FILE = new_product_plan.PLAN_FILE
 NP_COLUMNS = (("brand", "Brand"), ("category", "Sub category"), ("priority", "Priority"),
               ("total_urls", "Total URLs"), ("eligible_urls", "Eligible URLs"),
               ("urls_to_add", "URLs to add"), ("actions", ""))
-NP_CAPTION = ("URL targets and priorities are saved for the add run; the scheduled upload still caps "
-              "by the daily plan (offers). Website check for M&S/H&M: pending (backlog).")
-ALLOC_SECTION_TITLE = "Daily plan allocations (offers)"
+NP_CAPTION = ("Eligible = products on the M&S / H&M site that are not on Ozon yet (last site walk). URL targets "
+              "and priorities are saved as notes; what the 03:00 job actually adds is the daily plan below "
+              "(offers per brand x category).")
+ALLOC_SECTION_TITLE = "Daily plan allocations (offers) -- what the 03:00 new-products job adds"
 URLS_MAX_DIGITS = 7
 
 
@@ -1656,7 +1675,8 @@ class PrioritizationTab(_WidgetHelpers):
         self.np_rows = []
         self.np_vars = {}  # (brand, category) -> (StringVar, Entry, eligible)
         self._np_render_pending = False
-        self.alloc_open = False
+        self.alloc_open = True  # the table the 03:00 new-products job follows -- shown by default
+        self.hm_inventory = None
         self.website_win = None
 
         self.total_var = tk.StringVar(value=str(self.day["total"]))
@@ -1752,6 +1772,8 @@ class PrioritizationTab(_WidgetHelpers):
                    8, MUTED).pack(side="left", padx=(10, 0))
         self._build_table(self.alloc_body)
         self._update_alloc_toggle()
+        if self.alloc_open:
+            self.alloc_body.pack(fill="both", expand=True, after=self.alloc_toggle)
 
     def _update_alloc_toggle(self):
         self.alloc_toggle.configure(text=("▾ " if self.alloc_open else "▸ ") + ALLOC_SECTION_TITLE)
@@ -1836,6 +1858,7 @@ class PrioritizationTab(_WidgetHelpers):
     def load_local(self):
         """Re-reads every cached JSON file (cheap, local) and redraws."""
         self.inventory = load_json(HERE / INVENTORY_FILE, {}) or {}
+        self.hm_inventory = load_json(HERE / HM_INVENTORY_FILE, None)
         self.catalog = load_json(HERE / CATALOG_STATUS_FILE, {}) or {}
         self.deferred = deferred_count(load_json(HERE / DEFERRED_FILE, []))
         self.new_items = load_json(HERE / NEW_ITEMS_LOG, None)
@@ -1891,7 +1914,7 @@ class PrioritizationTab(_WidgetHelpers):
         for w in self.np_grid.winfo_children():
             w.destroy()
         self.np_vars = {}
-        self.np_rows = new_product_plan.build_rows(self.inventory, self.np_plan)
+        self.np_rows = new_product_plan.build_rows(self.inventory, self.np_plan, self.hm_inventory)
         g = self.np_grid
         for col, (_, heading) in enumerate(NP_COLUMNS):
             self.label(g, heading, 9, MUTED, True).grid(row=0, column=col, sticky="w", padx=(0, 14), pady=(0, 4))
@@ -2144,7 +2167,9 @@ class PrioritizationTab(_WidgetHelpers):
     def render_table(self):
         self._close_editor()
         sel = self.tree.selection()
-        self.rows = build_rows(self.inventory, self.catalog, self.day, self.created)
+        hm_created = {lbl: n for (b, lbl), n in (self.created_by_cat or {}).items() if b == HM}
+        self.rows = build_rows(self.inventory, self.catalog, self.day, self.created,
+                               self.hm_inventory, hm_created)
         self.tree.delete(*self.tree.get_children())
         for i, row in enumerate(self.rows):
             tags = ("readonly",) if not is_editable(row) else (("odd",) if i % 2 else ())
@@ -2212,7 +2237,7 @@ class PrioritizationTab(_WidgetHelpers):
         self._changed()
 
     def _ms_pools(self):
-        return {r["category"]: r["pool"] for r in self.rows if is_editable(r)}
+        return {(r["brand"], r["category"]): r["pool"] for r in self.rows if is_editable(r)}
 
     def on_spread_evenly(self):
         pools = self._ms_pools()

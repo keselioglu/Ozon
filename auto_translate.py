@@ -70,7 +70,9 @@ Russian translation entry as JSON matching the exact schema and style shown in t
 
 Hard rules (Ozon rejects listings that violate these):
 - "name" and "description" must be entirely in Cyrillic — zero Latin characters, including no English \
-product-line names left untranslated. Transliterate brand/line names into Cyrillic (e.g. "Rosalie" -> "Розали").
+product-line names left untranslated. Transliterate brand/line names into Cyrillic (e.g. "Rosalie" -> "Розали"). \
+Shape letters are Latin too: write a V-neck as "клиновидный вырез" (never "V-образный"), a U-neck as \
+"глубокий округлый вырез", an A-line as "трапециевидный силуэт", a T-shirt as "футболка".
 - "description" must be purely descriptive of the product itself. No external links, no seller contact info, \
 no calls to action ("посетите наш сайт", "смотрите наш ассортимент"), no comparisons to other brands or \
 marketplaces, no mentions of other marketplaces.
@@ -244,7 +246,19 @@ def _validate_translation(entry, is_underwear):
         raise ValueError(f"description is {len(entry['description'])} chars, over the 500 cap")
 
 
-def generate_translation(article_code, name, specs_json, client=None):
+def system_prompt_for(brand):
+    """SYSTEM_PROMPT is written for M&S; for H&M (2026-11-25) the brand/storefront words are
+    swapped, every rule stays the same."""
+    if brand == "H&M":
+        return (SYSTEM_PROMPT
+                .replace("Marks & Spencer \\\nwomen's underwear and loungewear", "H&M women's clothing")
+                .replace("Marks & Spencer women's underwear and loungewear", "H&M women's clothing")
+                .replace("a Turkish M&S storefront", "the Turkish H&M storefront")
+                .replace('no "MarksSpencer", no "marks", no "spencer" in any form', 'no "H&M", no "HM", no "эйчэндэм" in any form'))
+    return SYSTEM_PROMPT
+
+
+def generate_translation(article_code, name, specs_json, client=None, brand="M&S"):
     """Calls the Anthropic API to generate one translation entry for a product.
     Returns (entry_dict, None) on success, or (None, error_reason) on failure —
     caller should skip (never guess) on failure, same policy as the rest of the pipeline."""
@@ -267,33 +281,43 @@ def generate_translation(article_code, name, specs_json, client=None):
         "Respond with only the JSON object."
     )
 
-    try:
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=1024,
-            system=SYSTEM_PROMPT,
-            output_config={"format": {"type": "json_schema", "schema": OUTPUT_SCHEMA}},
-            messages=[{"role": "user", "content": user_prompt}],
-        )
-    except anthropic.APIError as e:
-        return None, f"Anthropic API call failed: {e}"
+    # One retry with the validation error fed back (2026-11-25: "V-образный" -- a Latin V --
+    # failed the Cyrillic-only check; the model fixes it when told why).
+    messages = [{"role": "user", "content": user_prompt}]
+    for attempt in range(2):
+        try:
+            response = client.messages.create(
+                model=MODEL,
+                max_tokens=1024,
+                system=system_prompt_for(brand),
+                output_config={"format": {"type": "json_schema", "schema": OUTPUT_SCHEMA}},
+                messages=messages,
+            )
+        except anthropic.APIError as e:
+            return None, f"Anthropic API call failed: {e}"
 
-    if response.stop_reason == "refusal":
-        return None, "Model refused to generate this translation (safety classifier) — skipping, needs manual review."
+        if response.stop_reason == "refusal":
+            return None, "Model refused to generate this translation (safety classifier) — skipping, needs manual review."
 
-    text_block = next((b for b in response.content if b.type == "text"), None)
-    if text_block is None:
-        return None, "No text content in model response."
+        text_block = next((b for b in response.content if b.type == "text"), None)
+        if text_block is None:
+            return None, "No text content in model response."
 
-    try:
-        entry = json.loads(text_block.text)
-    except json.JSONDecodeError as e:
-        return None, f"Model output was not valid JSON: {e}"
+        try:
+            entry = json.loads(text_block.text)
+        except json.JSONDecodeError as e:
+            return None, f"Model output was not valid JSON: {e}"
 
-    try:
-        _validate_translation(entry, is_underwear)
-    except ValueError as e:
-        return None, f"Generated translation failed policy validation: {e}"
+        try:
+            _validate_translation(entry, is_underwear)
+            break
+        except ValueError as e:
+            if attempt == 1:
+                return None, f"Generated translation failed policy validation: {e}"
+            messages = messages + [
+                {"role": "assistant", "content": text_block.text},
+                {"role": "user", "content": f"That entry was rejected: {e}. Fix only that problem and "
+                                            "respond with the corrected JSON object."}]
 
     if not is_underwear:
         entry.pop("planting_type_id", None)

@@ -65,7 +65,7 @@ def test_build_rows_numbers_and_days_of_supply():
     day = {"total": 500, "allocations": {"M&S": {"Pajama": 20}}, "fill_remainder": True}
     rows = ui.build_rows(_inventory(), CATALOG, day, created)
     by = {(r["brand"], r["category"]): r for r in rows}
-    assert len(rows) == len(daily_plan.CATEGORY_LABELS) + 1
+    assert len(rows) == 2 * len(daily_plan.CATEGORY_LABELS)  # one row per category per brand
     pj = by[("M&S", "Pajama")]
     assert (pj["live"], pj["crawled_not_live"], pj["deferred"], pj["discovered_est"]) == (100, 40, 10, 50)
     assert pj["created_today"] == 7
@@ -78,16 +78,19 @@ def test_build_rows_numbers_and_days_of_supply():
     assert socks["created_7d"] == 10
 
 
-def test_build_rows_hm_read_only():
-    rows = ui.build_rows(_inventory(), CATALOG, daily_plan.plan_for_date(daily_plan.default_plan(), TODAY),
-                         {})
-    hm = [r for r in rows if r["brand"] == "H&M"]
-    assert len(hm) == 1
-    assert hm[0]["live"] == 1273
-    assert hm[0]["note"] == "no add pipeline yet"
-    assert not ui.is_editable(hm[0])
-    assert ui.fmt_cell("allocation", hm[0]) == "no add pipeline yet"
-    assert all(ui.is_editable(r) for r in rows if r["brand"] == "M&S")
+def test_build_rows_hm_editable_per_category():
+    day = {"total": 100, "allocations": {"H&M": {"Dress": 20}}, "fill_remainder": False}
+    hm_inv = {"counts": {"Dress": {"products": 30, "offers": 120}}}
+    rows = ui.build_rows(_inventory(), CATALOG, day, {}, hm_inv, {"Dress": 4})
+    hm = {r["category"]: r for r in rows if r["brand"] == "H&M"}
+    assert list(hm) == list(daily_plan.CATEGORY_LABELS.values())
+    assert all(ui.is_editable(r) for r in rows)
+    d = hm["Dress"]
+    assert (d["discovered_est"], d["allocation"], d["created_today"], d["pool"]) == (120, 20, 4, 120)
+    assert d["days_of_supply"] == 6.0
+    assert ui.fmt_cell("allocation", d) == "20"
+    no_inv = [r for r in ui.build_rows(_inventory(), CATALOG, day, {}) if r["brand"] == "H&M"]
+    assert all(r["discovered_est"] is None for r in no_inv)
 
 
 def test_build_rows_with_no_cached_files():
@@ -143,10 +146,11 @@ def test_get_day_without_override_copies_default():
     assert not ui.has_override(plan, "2026-11-26")
 
 
-def test_set_allocation_refuses_hm():
+def test_set_allocation_both_brands():
     day = ui.get_day(daily_plan.default_plan(), "Default")
+    assert ui.set_allocation(day, "H&M", "Top", 10)["allocations"] == {"H&M": {"Top": 10}}
     with pytest.raises(ValueError):
-        ui.set_allocation(day, "H&M", "Top", 10)
+        ui.set_allocation(day, "Other", "Top", 10)
     with pytest.raises(ValueError):
         ui.set_allocation(day, "M&S", "Top", -1)
     assert ui.set_allocation(day, "M&S", "Top", 10)["allocations"] == {"M&S": {"Top": 10}}
@@ -393,8 +397,8 @@ def test_source_uses_new_product_plan_and_new_sources_without_new_endpoints():
     assert ui.READ_ONLY_ENDPOINTS == frozenset({"/v4/product/info/limit"})
     assert not any(m in src for m in ("import requests", "urllib.request", "http.client", "urlopen"))
     assert "NewProductAddingTab" in src
-    assert ui.NP_CAPTION.startswith("URL targets and priorities are saved for the add run")
-    assert ui.ALLOC_SECTION_TITLE == "Daily plan allocations (offers)"
+    assert "03:00 job" in ui.NP_CAPTION
+    assert ui.ALLOC_SECTION_TITLE.startswith("Daily plan allocations (offers)")
 
 
 def test_urls_entry_validation_and_parse():
@@ -423,7 +427,7 @@ def test_np_dirty_and_save_state():
     changed = npp.set_entry(saved, "M&S", "Pajama", urls_to_add=5)
     assert ui.np_is_dirty(changed, saved)
     assert ui.np_save_state(changed, saved) == ([], "Unsaved changes.")
-    bad = {"version": 1, "categories": {"H&M/All": {"urls_to_add": 3}}}
+    bad = {"version": 1, "categories": {"M&S/Pajama": {"urls_to_add": -3}}}
     errors, note = ui.np_save_state(bad, saved)
     assert errors and note.startswith("Can't save")
 
@@ -436,10 +440,11 @@ def test_np_rows_sort_and_add_buttons():
     plan = npp.set_entry(npp.default_plan(), "M&S", "Socks", priority="very_high")
     rows = npp.build_rows(inv, plan)
     assert rows[0]["category"] == "Socks" and rows[-1]["brand"] == "H&M"
-    pj = next(r for r in rows if r["category"] == "Pajama")
+    pj = next(r for r in rows if r["category"] == "Pajama" and r["brand"] == "M&S")
     assert (pj["total_urls"], pj["eligible_urls"]) == (17, 7)
     assert npp.add_all(pj) == 7 and npp.add_half(pj) == 3
-    assert ui.np_fmt(rows[-1]["eligible_urls"]) == "—"
+    assert ui.np_fmt(rows[-1]["eligible_urls"]) == "0"
+    assert ui.np_fmt(None) == "—"
 
 
 class _Var:

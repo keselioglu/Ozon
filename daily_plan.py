@@ -255,10 +255,13 @@ def created_today(path=NEW_ITEMS_LOG, today=None, products_csv=PRODUCTS_CSV):
         return 0, Counter()
     offer_ids = [o for o in (log.get("new_offer_ids") or []) if isinstance(o, str)]
     by_cat = Counter()
-    labels = _article_labels(products_csv) if offer_ids else {}
+    # run_new_products.py records each new offer's category in "labels" (H&M offers have no
+    # products.csv row); older entries fall back to products.csv by M&S article code.
+    logged = log.get("labels") if isinstance(log.get("labels"), dict) else {}
+    labels = _article_labels(products_csv) if offer_ids and len(logged) < len(offer_ids) else {}
     for oid in offer_ids:
         code = extract_article_code_from_offer_id(oid)
-        label = labels.get(code) if code else None
+        label = logged.get(oid) or (labels.get(code) if code else None)
         if label:
             by_cat[(brand_for_offer_id(oid), label)] += 1
     return len(offer_ids), by_cat

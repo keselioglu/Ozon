@@ -1,0 +1,562 @@
+"""
+Daily "add new products to Ozon" job, M&S and H&M (scheduled task OzonSales_DailyNewProducts,
+03:00 via run_new_products.bat). Business instruction 2026-11-25.
+
+How many and which: daily_plan.json for today's UTC date (03:00 Moscow = 00:00 UTC, so the
+job's day is the new UTC day). The owner sets it in the Ozon Sales app (Prioritization tab);
+allocations are per brand x category ({"M&S": {"Pajama": 30}, "H&M": {"Dress": 20}}).
+total 0 -> the job does nothing. The plan and the Ozon daily_create quota are hard caps;
+whole products (all their in-stock sizes) are taken or left, never half a product.
+
+Steps (each logged; any failure stops before the upload and is reported):
+  1. plan + quota -> what is left to create today, per brand x category
+  2. M&S: walk the M&S site sections of the planned categories (category_inventory.json),
+     products not on Ozon -> crawl each page fresh (today's price and stock)
+  3. H&M: read the planned H&M sections live (hm_site, same Chrome profile as the 02:00 H&M
+     stock job) -> products not on Ozon, in H&M's own ranking order -> product page details
+  4. pick whole products per category until the plan is covered
+  5. translate only the picked products that have no translation yet (auto_translate)
+  6. build Ozon items (same builders/rules as the existing uploads), drop offer_ids that
+     already exist on Ozon and any offer_id that appears twice (ambiguous -> skip)
+  7. upload (/v3/product/import), log to new_items_submitted.json / upload_tasks.jsonl
+  8. wait for Ozon's import result, then push stock for the created offers ONLY (M&S: the
+     fresh crawl count, H&M: 5 / 1 / 0) with the normal warehouse routing
+  9. new_products_status.json + new_products_history.jsonl + a short Telegram message
+
+    python run_new_products.py --dry-run     everything up to the upload, nothing written to
+                                             Ozon or the state files, no translation calls
+                                             (a placeholder translation tests the item build)
+    python run_new_products.py               the real run (what the scheduled task does)
+"""
+import argparse
+import json
+import os
+import sys
+import time
+import traceback
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
+
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+os.chdir(HERE)
+
+import daily_plan  # noqa: E402
+
+STATUS_FILE = "new_products_status.json"
+HISTORY_FILE = "new_products_history.jsonl"
+DRYRUN_FILE = "new_products_dryrun.json"
+LOCK_FILE = "new_products.lock"
+OVERSHOOT = 1.5            # look at this many more offers than needed (checks drop some)
+MAX_MS_PAGES_PER_LABEL = 60  # product pages fetched per M&S category at most
+HM_PAGES_PER_SECTION = 6   # listing pages (36 products each) read per H&M section at most
+IMPORT_WAIT_S = 900
+HM_SECTIONS_FOR = {
+    "Dress": ["elbise"], "Trousers": ["pantolon", "jean"], "Skirt": ["etek"], "Blouse": ["gomlek-bluz"],
+    "Top": ["ust"], "T-Shirt": ["ust"], "Tank Top": ["ust"], "Sweater": ["hirka-kazak"],
+    "Jacket": ["ceket-kaban", "blazer-yelek"], "Underwear": ["ic-camasir"], "Underwear Set": ["ic-camasir"],
+    "Pajama": ["ev-kiyafetleri", "gecelik"], "Socks": ["corap-kulotlu-corap"],
+}
+PLACEHOLDER_TRANSLATION = {"name": "Проверка", "description": "Проверка", "material_id": None,
+                           "material_text": "Проверка", "material_composition": "Состав: проверка",
+                           "care_text": "Проверка", "hashtags": "#a #b #c #d #e"}
+
+
+def log(msg=""):
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+# --- 1. what is left to create today -------------------------------------------------------
+
+def targets_for_today(today):
+    """-> (remaining dict from daily_plan.remaining_today, {(brand, label): offers wanted},
+    open_brands) -- open_brands: brands that may take any category (fill_remainder with no
+    allocation for them)."""
+    from upload_to_ozon import check_quota
+    plan = daily_plan.load_plan()
+    day = daily_plan.plan_for_date(plan, today)
+    quota = check_quota()
+    q_left = None
+    if quota:
+        dc = quota.get("daily_create", {})
+        q_left = dc.get("limit", 0) - dc.get("usage", 0)
+    created_total, created_by_cat = daily_plan.created_today(today=today)
+    remaining = daily_plan.remaining_today(plan, q_left, created_total, created_by_cat, today)
+    log(f"Plan {today}: total {day['total']}, created so far {created_total}, quota left {q_left} "
+        f"-> {remaining['total']} new offer(s) may be created; fill_remainder {remaining['fill_remainder']}")
+    want = {k: n for k, n in remaining["per_category"].items() if n > 0}
+    open_brands = set()
+    if remaining["fill_remainder"] and remaining["total"] > sum(want.values()):
+        open_brands = {"M&S", "H&M"}
+    remaining["plan_total"] = day["total"]
+    remaining["created_before"] = created_total
+    remaining["quota_left"] = q_left
+    return remaining, want, open_brands
+
+
+def labels_for(brand, want, open_brands):
+    labels = [lbl for (b, lbl) in want if b == brand]
+    if brand in open_brands:
+        labels += [lbl for lbl in daily_plan.CATEGORY_LABELS.values() if lbl not in labels]
+    return labels
+
+
+def needed(brand, label, want, remaining):
+    n = want.get((brand, label))
+    return n if n else remaining["total"]
+
+
+# --- 2. M&S candidates -----------------------------------------------------------------------
+
+def ms_sections(label):
+    inv = {}
+    try:
+        with open("category_inventory.json", encoding="utf-8") as f:
+            inv = json.load(f)
+    except (OSError, ValueError):
+        pass
+    secs = ((inv.get("discovery_found") or {}).get("sections") or {}).get(label) or []
+    if not secs:
+        import category_priority as cp
+        secs = [{"name": r.get("Category Name (TR)"), "url": r.get("Full URL"), "priority": r.get("Proprity")}
+                for r in cp.load_priority_categories() if cp.is_supported_category(r.get("Category Name (TR)"), r.get("Full URL"))
+                and daily_plan.category_label_for_name(r.get("Category Name (TR)")) == label]
+    return sorted(secs, key=lambda s: float(s.get("priority") or 9999))
+
+
+def ms_candidates(labels, want, remaining, report):
+    """-> {label: [ {url, name, rows} ... ]} freshly crawled, not on Ozon, in priority order."""
+    import category_priority as cp
+    import crawler
+    if not labels:
+        return {}
+    log(f"M&S: categories {labels}; reading live M&S offers on Ozon...")
+    live = cp.fetch_live_ms_identifiers()
+    seen = set(crawler.load_line_set("product_urls.txt"))  # already queued/crawled -> same as daily discovery
+    out = {}
+    for label in labels:
+        goal = needed("M&S", label, want, remaining) * OVERSHOOT
+        got, fetched, picked = 0, 0, []
+        for sec in ms_sections(label):
+            if got >= goal or fetched >= MAX_MS_PAGES_PER_LABEL:
+                break
+            log(f"  M&S {label}: section {sec.get('name')} ({sec.get('url')})")
+            for item in cp.iter_new_products_in_category(sec["url"], live, seen):
+                seen.add(item["url"])
+                fetched += 1
+                if daily_plan.category_label_for_name(item["name"]) == label and item["offers"] > 0:
+                    rows = crawler.extract_product(item["url"]) or []
+                    if any((r.get("stock_count") or 0) > 0 for r in rows):
+                        picked.append({"url": item["url"], "name": item["name"], "rows": rows})
+                        got += item["offers"]
+                if got >= goal or fetched >= MAX_MS_PAGES_PER_LABEL:
+                    break
+        log(f"  M&S {label}: {len(picked)} product(s) found (~{got} offer(s)), {fetched} page(s) checked")
+        report["ms_found"][label] = {"products": len(picked), "offers_est": got}
+        out[label] = picked
+    return out
+
+
+# --- 3. H&M candidates -----------------------------------------------------------------------
+
+def wait_for_hm_port(max_wait_s=1800):
+    """The 02:00 H&M stock job uses the same Chrome port; wait if it's still running."""
+    import urllib.request
+    from refresh_hm_stock import PORT
+    t0 = time.time()
+    while time.time() - t0 < max_wait_s:
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{PORT}/json/version", timeout=2).close()
+        except OSError:
+            return True
+        log("  H&M Chrome port busy (H&M stock job still running?) -- waiting 60 s")
+        time.sleep(60)
+    return False
+
+
+def hm_candidates(labels, want, remaining, report, hm):
+    """-> {label: [ {rec, detail} ... ]} not on Ozon, in H&M ranking order."""
+    import hm_catalog as hc
+    import hm_inventory as hi
+    if not labels:
+        return {}
+    live = hi.live_hm_articles()
+    sections = []
+    for lbl in labels:
+        for name in HM_SECTIONS_FOR.get(lbl, []):
+            path = f"/tr_tr/kadin/urune-gore-satin-al/{name}.html"
+            if path not in sections:
+                sections.append(path)
+    goal = {lbl: needed("H&M", lbl, want, remaining) * OVERSHOOT for lbl in labels}
+    got = Counter()
+    out = defaultdict(list)
+    seen = set()
+    skips = Counter()
+    for path in sections:
+        page, total = 1, 1
+        while page <= min(total, HM_PAGES_PER_SECTION):
+            if all(got[l] >= goal[l] for l in labels):
+                break
+            hits, total = hm.listing(path, page)
+            page += 1
+            for h in hits:
+                rec = hc.summarize_hit(h)
+                if rec["article"] in seen:
+                    continue
+                seen.add(rec["article"])
+                why = hc.skip_reason(rec, live)
+                label = daily_plan.category_label_for_type(rec["type_id"]) if not why else None
+                if why or label not in goal:
+                    skips[why or "category not planned"] += 1
+                    continue
+                if got[label] >= goal[label]:
+                    continue
+                detail = hm.product(rec["article"])
+                if not detail:
+                    skips["product page gone"] += 1
+                    continue
+                out[label].append({"rec": rec, "detail": detail})
+                got[label] += len(hc.sellable_sizes(rec))
+        log(f"  H&M {path.rsplit('/', 1)[-1]}: read up to page {page - 1}/{total}")
+    for lbl in labels:
+        log(f"  H&M {lbl}: {len(out[lbl])} product(s) (~{got[lbl]} offer(s))")
+        report["hm_found"][lbl] = {"products": len(out[lbl]), "offers_est": got[lbl]}
+    report["hm_skips"] = dict(skips)
+    return out
+
+
+# --- 4-6. pick, translate, build -------------------------------------------------------------
+
+def ms_items_for(product, translations, dry_run, dup_checks):
+    import pandas as pd
+    import upload_to_ozon as u
+    from ozon_translations import PRODUCT_TRANSLATIONS
+    live_codes, live_by_article = dup_checks
+    items = []
+    for row in product["rows"]:
+        r = pd.Series(row)
+        art = row.get("ms_article_code")
+        if not art:
+            continue
+        if live_codes.get(art, set()) - {"MS"}:
+            return [], "already live under another prefix"
+        if u.is_color_duplicate_risk(art, row.get("color"), live_by_article):
+            return [], "possible colour duplicate of a live listing"
+        if art in translations:
+            PRODUCT_TRANSLATIONS.setdefault(art, translations[art])
+        item, _w = u.build_ozon_item(r)
+        if item:
+            item["_stock"] = int(row.get("stock_count") or 0)
+            items.append(item)
+    return items, None if items else "no size/colour could be mapped"
+
+
+def translate(brand, article, name, specs_json, dry_run, client_box):
+    from ozon_translations import PRODUCT_TRANSLATIONS
+    if article in PRODUCT_TRANSLATIONS:
+        return PRODUCT_TRANSLATIONS[article], None
+    if dry_run:
+        return dict(PLACEHOLDER_TRANSLATION), None
+    import anthropic
+    import auto_translate as at
+    client_box.setdefault("c", anthropic.Anthropic())
+    entry, err = at.generate_translation(article, name, specs_json, client=client_box["c"], brand=brand)
+    if err:
+        return None, err
+    at.append_translation_to_file(article, entry)
+    PRODUCT_TRANSLATIONS[article] = entry
+    return entry, None
+
+
+def pick_and_build(ms_found, hm_found, want, open_brands, remaining, dry_run, report):
+    """Whole products, category by category, in priority order, until each category's
+    allocation (and the day's total) is covered. -> list of (brand, label, items, source)."""
+    import hm_catalog as hc
+    import upload_to_ozon as u
+    from upload_to_ozon import find_existing_offer_ids
+    total_left = remaining["total"]
+    per_left = {k: v for k, v in want.items()}
+    client_box = {}
+    dup_checks = (u.fetch_live_article_codes_by_prefix(), u.fetch_live_offer_ids_by_article()) if ms_found else ({}, {})
+    queues = [("M&S", lbl, ms_found.get(lbl, [])) for lbl in ms_found] + \
+             [("H&M", lbl, hm_found.get(lbl, [])) for lbl in hm_found]
+    # allocated categories first, then (fill_remainder) the open ones
+    queues.sort(key=lambda q: 0 if (q[0], q[1]) in per_left else 1)
+    chosen, skipped = [], Counter()
+    for brand, label, products in queues:
+        key = (brand, label)
+        for p in products:
+            if total_left <= 0:
+                break
+            cap = per_left.get(key)
+            if cap is not None and cap <= 0:
+                break
+            if cap is None and brand not in open_brands:
+                break
+            if brand == "M&S":
+                art = p["rows"][0].get("ms_article_code")
+                specs = p["rows"][0].get("specs_json")
+                tr, err = translate("M&S", art, p["name"], specs, dry_run, client_box) if art else (None, "no article")
+                if not tr:
+                    skipped[f"translation: {err}"[:80]] += 1
+                    continue
+                items, why = ms_items_for(p, {art: tr}, dry_run, dup_checks)
+            else:
+                rec, det = p["rec"], p["detail"]
+                tr, err = translate("H&M", rec["article"], rec["title"], hc.specs_for_translation(det), dry_run, client_box)
+                if not tr:
+                    skipped[f"translation: {err}"[:80]] += 1
+                    continue
+                items = hc.build_items(rec, det, tr, u.TRY_TO_USD_RATE, u.package_dimensions(rec["title"]))
+                why = None if items else "no image/colour/size"
+            if why:
+                skipped[why] += 1
+                continue
+            existing = find_existing_offer_ids(it["offer_id"] for it in items)
+            ids = [it["offer_id"] for it in items]
+            if existing:
+                skipped["offer_id already exists on Ozon"] += 1
+                continue
+            if len(set(ids)) != len(ids):
+                skipped["two sizes map to the same offer_id (ambiguous)"] += 1
+                continue
+            n = len(items)
+            if n > total_left or (cap is not None and n > cap):
+                skipped["does not fit in what is left of the plan"] += 1
+                continue
+            chosen.append((brand, label, items, p.get("url") or p.get("rec", {}).get("article")))
+            total_left -= n
+            if cap is not None:
+                per_left[key] = cap - n
+    report["skipped_at_build"] = dict(skipped)
+    return chosen
+
+
+# --- 7-8. upload, wait, stock ---------------------------------------------------------------
+
+def save_ms_rows(chosen_ms_products):
+    """Persist the fresh M&S crawl rows (products.csv, product_urls.txt, processed_log.txt) so the
+    01:00 stock job and the reports know these products."""
+    import pandas as pd
+    if not chosen_ms_products:
+        return
+    rows = [r for p in chosen_ms_products for r in p["rows"]]
+    urls = {p["url"] for p in chosen_ms_products}
+    df = pd.read_csv("products.csv", encoding="utf-8-sig", low_memory=False)
+    df = pd.concat([df[~df["url"].isin(urls)], pd.DataFrame(rows)], ignore_index=True)
+    tmp = "products.csv.tmp"
+    df.to_csv(tmp, index=False, encoding="utf-8-sig")
+    os.replace(tmp, "products.csv")
+    for f in ("product_urls.txt", "processed_log.txt"):
+        with open(f, "a", encoding="utf-8") as fh:
+            for url in sorted(urls):
+                fh.write(url + "\n")
+
+
+def log_new_items(items, today):
+    from upload_to_ozon import NEW_ITEMS_LOG
+    prior = {}
+    try:
+        with open(NEW_ITEMS_LOG, encoding="utf-8") as f:
+            prior = json.load(f)
+    except (OSError, ValueError):
+        pass
+    if prior.get("date") != today:
+        prior = {"date": today, "quota_before": None, "new_offer_ids": [], "labels": {}}
+    prior.setdefault("labels", {})
+    for it in items:
+        prior["new_offer_ids"].append(it["offer_id"])
+        lbl = daily_plan.category_label_for_type(it.get("type_id"))
+        if lbl:
+            prior["labels"][it["offer_id"]] = lbl
+    tmp = NEW_ITEMS_LOG + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(prior, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, NEW_ITEMS_LOG)
+
+
+def upload(items):
+    from ozon_client import call
+    from upload_to_ozon import TASK_LOG
+    task_ids = []
+    for i in range(0, len(items), 100):
+        batch = [{k: v for k, v in it.items() if not k.startswith("_")} for it in items[i:i + 100]]
+        r = call("/v3/product/import", {"items": batch})
+        tid = (r.get("result") or {}).get("task_id")
+        log(f"  batch {i // 100 + 1}: {len(batch)} item(s) -> task_id {tid}")
+        with open(TASK_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"task_id": tid, "batch_size": len(batch), "source": "run_new_products"}) + "\n")
+        if tid:
+            task_ids.append(tid)
+        time.sleep(1)
+    return task_ids
+
+
+def wait_for_import(task_ids, max_wait_s=IMPORT_WAIT_S):
+    """-> ({offer_id: status}, {offer_id: errors}) once nothing is pending (or time is up)."""
+    from ozon_client import call
+    status, errors = {}, {}
+    t0 = time.time()
+    while True:
+        pending = 0
+        for tid in task_ids:
+            try:
+                r = call("/v1/product/import/info", {"task_id": tid})
+            except Exception as e:
+                log(f"  import/info {tid}: {e}")
+                pending += 1
+                continue
+            for it in (r.get("result") or {}).get("items", []):
+                status[it["offer_id"]] = it.get("status")
+                if it.get("errors"):
+                    errors[it["offer_id"]] = it["errors"]
+                if it.get("status") in ("pending", "processing", None):
+                    pending += 1
+        if not pending or time.time() - t0 > max_wait_s:
+            return status, errors
+        time.sleep(30)
+
+
+# --- 9. status -------------------------------------------------------------------------------
+
+def write_json(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1, default=str)
+    os.replace(tmp, path)
+
+
+def telegram(text):
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except Exception:
+        pass
+    try:
+        import telegram_notify
+        telegram_notify.send_telegram(text)
+    except Exception as e:
+        log(f"Telegram not sent: {e}")
+
+
+def run(dry_run=False, today=None):
+    today = today or daily_plan.utc_today()
+    started = datetime.now()
+    report = {"date": today, "dry_run": dry_run, "started_at": started.isoformat(timespec="seconds"),
+              "state": "running", "ms_found": {}, "hm_found": {}, "created": {}, "failed": {}}
+    if not dry_run:
+        write_json(STATUS_FILE, report)
+    remaining, want, open_brands = targets_for_today(today)
+    report["plan"] = {"total": remaining["plan_total"], "left": remaining["total"],
+                      "created_before": remaining["created_before"], "quota_left": remaining["quota_left"],
+                      "allocations": {f"{b}/{l}": n for (b, l), n in want.items()}, "open_brands": sorted(open_brands)}
+    if remaining["total"] <= 0:
+        log("Nothing planned / left for today -- done.")
+        report["state"] = "nothing_planned"
+        return report
+    ms_labels = labels_for("M&S", want, open_brands)
+    hm_labels = labels_for("H&M", want, open_brands)
+
+    ms_found = ms_candidates(ms_labels, want, remaining, report)
+    hm_found = {}
+    if hm_labels:
+        from hm_site import HMBrowser
+        if not wait_for_hm_port():
+            raise RuntimeError("H&M Chrome port still busy after 30 min")
+        log(f"H&M: categories {hm_labels}")
+        with HMBrowser() as hm:
+            hm_found = hm_candidates(hm_labels, want, remaining, report, hm)
+
+    log("Picking whole products and building Ozon items...")
+    chosen = pick_and_build(ms_found, hm_found, want, open_brands, remaining, dry_run, report)
+    items = [it for (_b, _l, its, _s) in chosen for it in its]
+    sel = Counter()
+    for b, l, its, _s in chosen:
+        sel[f"{b}/{l}"] += len(its)
+    report["selected"] = dict(sel)
+    report["selected_products"] = [{"brand": b, "category": l, "source": s, "offers": [i["offer_id"] for i in its],
+                                    "price_usd": its[0]["price"], "name": its[0]["name"]} for b, l, its, s in chosen]
+    log(f"Selected {len(items)} offer(s) from {len(chosen)} product(s): {dict(sel)}")
+    if dry_run:
+        report["state"] = "dry_run_ok"
+        return report
+    if not items:
+        report["state"] = "nothing_found"
+        return report
+
+    chosen_urls = {s for b, _l, _i, s in chosen if b == "M&S"}
+    save_ms_rows([p for lst in ms_found.values() for p in lst if p["url"] in chosen_urls])
+    log_new_items(items, today)
+    log(f"Uploading {len(items)} new offer(s)...")
+    task_ids = upload(items)
+    status, errors = wait_for_import(task_ids)
+    ok = [it for it in items if status.get(it["offer_id"]) == "imported"]
+    bad = [it for it in items if status.get(it["offer_id"]) != "imported"]
+    for it in ok:
+        k = f"{daily_plan.brand_for_offer_id(it['offer_id'])}/{daily_plan.category_label_for_type(it['type_id'])}"
+        report["created"][k] = report["created"].get(k, 0) + 1
+    report["failed"] = {it["offer_id"]: {"status": status.get(it["offer_id"]), "errors": errors.get(it["offer_id"])}
+                        for it in bad}
+    log(f"Ozon import: {len(ok)} imported, {len(bad)} not imported")
+
+    if ok:
+        import update_stocks as us
+        updates = [{"offer_id": it["offer_id"], "stock": it["_stock"]} for it in ok]
+        log(f"Pushing stock for the {len(updates)} new offer(s) only...")
+        us.push_stock_updates_for(updates)
+        report["stock_pushed"] = len(updates)
+    report["state"] = "completed" if not bad else "completed_with_errors"
+    return report
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="Add new M&S + H&M products to Ozon (daily plan).")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--date", help="plan date YYYY-MM-DD (UTC) -- for --dry-run checks of a future day")
+    a = ap.parse_args(argv)
+    if a.date and not a.dry_run:
+        ap.error("--date only with --dry-run")
+    if os.path.exists(LOCK_FILE) and time.time() - os.path.getmtime(LOCK_FILE) < 6 * 3600:
+        log(f"{LOCK_FILE} exists -- another run is active. Exiting.")
+        return 3
+    with open(LOCK_FILE, "w") as f:
+        f.write(str(os.getpid()))
+    report = {"date": a.date or daily_plan.utc_today(), "dry_run": a.dry_run}
+    rc = 0
+    try:
+        report = run(dry_run=a.dry_run, today=a.date)
+    except Exception as e:
+        rc = 1
+        report.update(state="failed", error=f"{type(e).__name__}: {e}", traceback=traceback.format_exc()[-3000:])
+        log(f"FAILED: {type(e).__name__}: {e}")
+        traceback.print_exc()
+    finally:
+        try:
+            os.remove(LOCK_FILE)
+        except OSError:
+            pass
+    report["finished_at"] = datetime.now().isoformat(timespec="seconds")
+    if a.dry_run:
+        write_json(DRYRUN_FILE, report)
+        log(f"Dry run report: {DRYRUN_FILE} (state {report.get('state')})")
+    else:
+        write_json(STATUS_FILE, report)
+        with open(HISTORY_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps({k: v for k, v in report.items() if k not in ("traceback", "selected_products")},
+                               ensure_ascii=False, default=str) + "\n")
+        if report.get("state") not in ("nothing_planned",):
+            created = sum(report.get("created", {}).values())
+            text = (f"Ozon new products {report['date']}: {report.get('state')}\n"
+                    f"created {created} offer(s): {report.get('created') or '-'}\n"
+                    f"not imported: {len(report.get('failed') or {})}")
+            if report.get("error"):
+                text += f"\nerror: {report['error'][:300]}"
+            telegram(text)
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

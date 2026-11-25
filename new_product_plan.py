@@ -36,7 +36,7 @@ DEFAULT_URLS_TO_ADD = 0
 
 MS = "M&S"
 HM = "H&M"
-READ_ONLY_BRANDS = (HM,)
+READ_ONLY_BRANDS = ()  # H&M has an add pipeline since 2026-11-25 (run_new_products.py)
 HM_NOTE = "no add pipeline yet / website check pending"
 HM_CATEGORY = "All"
 
@@ -186,55 +186,42 @@ def _brand_block(inventory, brand):
     return block if isinstance(block, dict) else {}
 
 
-def build_rows(inventory, plan):
-    """One editable row per M&S category (daily_plan.CATEGORY_LABELS order),
-    sorted by priority rank with CATEGORY_LABELS order as the tie-break,
-    then one read-only H&M row. inventory is the category_inventory.json
-    snapshot (or None); missing counts are 0. Pure, never raises on bad
-    input shapes."""
+def build_rows(inventory, plan, hm_inventory=None):
+    """One editable row per category (daily_plan.CATEGORY_LABELS order) for M&S and then for
+    H&M, each brand sorted by priority rank with CATEGORY_LABELS order as the tie-break.
+    inventory is the category_inventory.json snapshot, hm_inventory hm_inventory.json (either
+    may be None); missing counts are 0. Pure, never raises on bad input shapes."""
     ms_cats = _brand_block(inventory, MS).get("categories")
     if not isinstance(ms_cats, dict):
         ms_cats = {}
-    rows = []
-    for order, label in enumerate(daily_plan.CATEGORY_LABELS.values()):
-        c = ms_cats.get(label) or {}
-        live = _count(c, "live_products")
-        crawled = _count(c, "crawled_not_live_products")
-        discovered = _count(c, "discovered_not_live_products")
-        eligible = crawled + discovered
-        entry = get_entry(plan, MS, label)
-        rows.append({
-            "brand": MS,
-            "category": label,
-            "priority": entry["priority"],
-            "priority_label": PRIORITY_LABEL[entry["priority"]],
-            "total_urls": live + eligible,
-            "eligible_urls": eligible,
-            "urls_to_add": entry["urls_to_add"],
-            "editable": True,
-            "over_eligible": entry["urls_to_add"] > eligible,
-            "note": None,
-            "_order": order,
-        })
-    rows.sort(key=lambda r: (PRIORITY_RANK[r["priority"]], r["_order"]))
-    for r in rows:
-        del r["_order"]
-    hm = _brand_block(inventory, HM)
-    rows.append({
-        "brand": HM,
-        "category": HM_CATEGORY,
-        "priority": None,
-        "priority_label": None,
-        "total_urls": None,
-        "eligible_urls": None,
-        "urls_to_add": None,
-        "editable": False,
-        "over_eligible": False,
-        "note": HM_NOTE,
-        "live": hm.get("live"),
-        "for_sale": hm.get("for_sale"),
-    })
-    return rows
+    hm_counts = (hm_inventory or {}).get("counts") if isinstance(hm_inventory, dict) else None
+    if not isinstance(hm_counts, dict):
+        hm_counts = {}
+
+    def row(brand, label, order, live, eligible, note=None):
+        entry = get_entry(plan, brand, label)
+        return {"brand": brand, "category": label, "priority": entry["priority"],
+                "priority_label": PRIORITY_LABEL[entry["priority"]], "total_urls": live + eligible,
+                "eligible_urls": eligible, "urls_to_add": entry["urls_to_add"], "editable": True,
+                "over_eligible": entry["urls_to_add"] > eligible, "note": note, "_order": order}
+
+    out = []
+    for brand in (MS, HM):
+        rows = []
+        for order, label in enumerate(daily_plan.CATEGORY_LABELS.values()):
+            if brand == MS:
+                c = ms_cats.get(label) or {}
+                eligible = _count(c, "crawled_not_live_products") + _count(c, "discovered_not_live_products")
+                rows.append(row(MS, label, order, _count(c, "live_products"), eligible))
+            else:
+                eligible = _count(hm_counts.get(label) or {}, "products")
+                rows.append(row(HM, label, order, 0, eligible,
+                                None if hm_inventory else "run hm_inventory.py for numbers"))
+        rows.sort(key=lambda r: (PRIORITY_RANK[r["priority"]], r["_order"]))
+        for r in rows:
+            del r["_order"]
+        out += rows
+    return out
 
 
 def add_all(row):

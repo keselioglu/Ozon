@@ -59,3 +59,11 @@ new_source_requests.json
 new_source_requests.json.bak
 .new_source_requests_*.tmp
 .tasks_*.tmp
+hm_inventory.json
+new_products_status.json
+new_products_history.jsonl
+new_products_dryrun.json
+new_products.lock
+new_products_daily_*.log
+*.tmp
+hm_chrome_profile/

@@ -34,6 +34,7 @@ if sys.platform == "win32":
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 INVENTORY_FILE = os.path.join(HERE, "category_inventory.json")
+HM_INVENTORY_FILE = os.path.join(HERE, "hm_inventory.json")
 OUT_FILE = os.path.join(HERE, "available_to_add.json")
 MS, HM = "M&S", "H&M"
 
@@ -70,9 +71,9 @@ def ready_now():
             pass
 
 
-def combine(inventory, ready):
+def combine(inventory, ready, hm_inventory=None):
     """Pure: rows per brand/category. inventory = category_inventory.json dict (or None),
-    ready = write_available_report() dict."""
+    ready = write_available_report() dict, hm_inventory = hm_inventory.json (None -> read file)."""
     ms = ((inventory or {}).get("brands") or {}).get(MS) or {}
     cats = ms.get("categories") or {}
     ready_by = {}
@@ -94,6 +95,14 @@ def combine(inventory, ready):
     rows.sort(key=lambda r: -r["total_offers_est"])
     hm = ((inventory or {}).get("brands") or {}).get(HM) or {}
     walk = (inventory or {}).get("discovery_found") or {}
+    hm_inv = _read_json(HM_INVENTORY_FILE) if hm_inventory is None else hm_inventory
+    hm_rows = []
+    for label, c in ((hm_inv or {}).get("counts") or {}).items():
+        hm_rows.append({"brand": HM, "category": label, "live_offers": None, "ready_offers": 0, "ready_articles": 0,
+                        "site_products": c.get("products", 0), "site_offers_est": c.get("offers", 0),
+                        "total_offers_est": c.get("offers", 0)})
+    hm_rows.sort(key=lambda r: -r["total_offers_est"])
+    rows += hm_rows
     return {"generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "walk_date": walk.get("date"),
             "inventory_built": (inventory or {}).get("built"),
@@ -102,8 +111,10 @@ def combine(inventory, ready):
             "totals": {"ready_offers": sum(r["ready_offers"] for r in rows),
                        "site_offers_est": sum(r["site_offers_est"] or 0 for r in rows),
                        "total_offers_est": sum(r["total_offers_est"] for r in rows)},
+            "hm_walked_at": (hm_inv or {}).get("walked_at"),
             "hm": {"live": hm.get("live"), "for_sale": hm.get("for_sale"),
-                   "note": "no H&M add pipeline yet -- not counted"}}
+                   "skips": (hm_inv or {}).get("skips"),
+                   "note": "from hm_inventory.py" if hm_inv else "run hm_inventory.py for H&M numbers"}}
 
 
 def write_atomic(data, path=OUT_FILE):
@@ -116,19 +127,22 @@ def write_atomic(data, path=OUT_FILE):
 def print_table(d):
     def n(v):
         return "-" if v is None else f"{v:,}"
-    print(f"\nAvailable to add (M&S), walk of {d['walk_date'] or 'NEVER -- run with --walk'}\n")
-    head = f"{'Category':<15}{'Live':>8}{'Ready now':>11}{'On site (products)':>20}{'On site (offers~)':>19}{'Total~':>9}"
+    print(f"\nAvailable to add -- M&S walk {d['walk_date'] or 'NEVER'}, H&M walk {d.get('hm_walked_at') or 'NEVER'}\n")
+    head = (f"{'Brand':<6}{'Category':<15}{'Live':>8}{'Ready now':>11}{'On site (products)':>20}"
+            f"{'On site (offers~)':>19}{'Total~':>9}")
     print(head)
     print("-" * len(head))
-    for r in d["rows"]:
-        print(f"{r['category']:<15}{n(r['live_offers']):>8}{n(r['ready_offers']):>11}"
-              f"{n(r['site_products']):>20}{n(r['site_offers_est']):>19}{n(r['total_offers_est']):>9}")
-    t = d["totals"]
-    print("-" * len(head))
-    print(f"{'Total':<15}{'':>8}{n(t['ready_offers']):>11}{'':>20}{n(t['site_offers_est']):>19}{n(t['total_offers_est']):>9}")
-    print("\nReady now = crawled, in stock, not on Ozon, passes every upload check.")
-    print("On site = found on marksandspencer.com.tr, not crawled yet (before upload checks).")
-    print(f"H&M: {d['hm']['note']} (live {n(d['hm']['live'])}).")
+    for brand in (MS, HM):
+        rs = [r for r in d["rows"] if r["brand"] == brand]
+        for r in rs:
+            print(f"{brand:<6}{r['category']:<15}{n(r['live_offers']):>8}{n(r['ready_offers']):>11}"
+                  f"{n(r['site_products']):>20}{n(r['site_offers_est']):>19}{n(r['total_offers_est']):>9}")
+        print(f"{brand:<6}{'TOTAL':<15}{'':>8}{n(sum(r['ready_offers'] for r in rs)):>11}"
+              f"{n(sum(r['site_products'] or 0 for r in rs)):>20}{n(sum(r['site_offers_est'] or 0 for r in rs)):>19}"
+              f"{n(sum(r['total_offers_est'] for r in rs)):>9}")
+        print("-" * len(head))
+    print("Ready now = crawled, in stock, not on Ozon, passes every upload check.")
+    print("On site = on the brand's site, not on Ozon; M&S before upload checks, H&M after colour/size/category checks.")
 
 
 def main(argv=None):

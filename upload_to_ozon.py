@@ -615,21 +615,27 @@ def main(argv=None):
     # most recent run's.
     if new_items:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        existing_today_ids = []
+        existing_today_ids, labels = [], {}
         try:
             with open(NEW_ITEMS_LOG, encoding="utf-8") as f:
                 prior = json.load(f)
             if prior.get("date") == today:
                 existing_today_ids = prior.get("new_offer_ids", [])
+                labels = prior.get("labels") or {}  # written by run_new_products.py -- keep it
         except (FileNotFoundError, json.JSONDecodeError):
             pass
 
         combined_ids = existing_today_ids + [it["offer_id"] for it in new_items]
+        for it in new_items:
+            label = daily_plan.category_label_for_type(it.get("type_id"))
+            if label:
+                labels[it["offer_id"]] = label
         with open(NEW_ITEMS_LOG, "w", encoding="utf-8") as f:
             json.dump({
                 "date": today,
                 "quota_before": quota.get("daily_create") if quota else None,
                 "new_offer_ids": combined_ids,
+                "labels": labels,
             }, f, ensure_ascii=False, indent=2)
         print(f"Logged {len(new_items)} new-product offer_id(s) from this run "
               f"({len(combined_ids)} total logged for today) to {NEW_ITEMS_LOG}.\n")

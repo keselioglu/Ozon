@@ -33,11 +33,12 @@ def test_load_drops_invalid_entries_keeps_valid(tmp_path):
         "M&S/Pajama": {"priority": "high", "urls_to_add": 40},
         "M&S/Socks": {"priority": "urgent", "urls_to_add": 1},
         "M&S/Dress": {"priority": "low", "urls_to_add": -2},
-        "H&M/All": {"priority": "low", "urls_to_add": 1},
+        "H&M/Dress": {"priority": "low", "urls_to_add": 1},
         "nokey": {"priority": "low"},
     }}), encoding="utf-8")
     plan = npp.load_plan(str(p))
-    assert plan["categories"] == {"M&S/Pajama": {"priority": "high", "urls_to_add": 40}}
+    assert plan["categories"] == {"M&S/Pajama": {"priority": "high", "urls_to_add": 40},
+                                  "H&M/Dress": {"priority": "low", "urls_to_add": 1}}
 
 
 def test_save_load_round_trip(tmp_path):
@@ -100,9 +101,12 @@ def test_set_entry_rejects_invalid(kwargs):
         npp.set_entry(npp.default_plan(), "M&S", "Pajama", **kwargs)
 
 
-def test_set_entry_refuses_hm():
+def test_set_entry_accepts_hm():
+    # H&M has an add pipeline since 2026-11-25 (run_new_products.py)
+    plan = npp.set_entry(npp.default_plan(), "H&M", "Dress", urls_to_add=1)
+    assert npp.get_entry(plan, "H&M", "Dress")["urls_to_add"] == 1
     with pytest.raises(ValueError):
-        npp.set_entry(npp.default_plan(), "H&M", "All", urls_to_add=1)
+        npp.set_entry(npp.default_plan(), "", "Dress", urls_to_add=1)
 
 
 # --- add all / add half ---------------------------------------------------------
@@ -157,16 +161,16 @@ def test_rows_sorted_by_priority_then_label_order():
     assert medium == [l for l in LABELS if l in medium]
 
 
-def test_hm_row_read_only():
-    rows = npp.build_rows(_inv(hm={"live": 50, "for_sale": 30}), npp.default_plan())
+def test_hm_rows_per_category_from_hm_inventory():
+    hm_inv = {"counts": {"Dress": {"products": 12, "offers": 50}}}
+    rows = npp.build_rows(_inv(), npp.default_plan(), hm_inv)
     hm = [r for r in rows if r["brand"] == "H&M"]
-    assert len(hm) == 1
-    hm = hm[0]
-    assert rows[-1] is hm
-    assert hm["editable"] is False
-    assert hm["total_urls"] is None and hm["eligible_urls"] is None
-    assert hm["note"] == "no add pipeline yet / website check pending"
-    assert hm["live"] == 50
+    assert [r["category"] for r in hm] == LABELS
+    assert all(r["editable"] for r in hm)
+    dress = next(r for r in hm if r["category"] == "Dress")
+    assert dress["eligible_urls"] == 12 and dress["note"] is None
+    no_inv = [r for r in npp.build_rows(_inv(), npp.default_plan()) if r["brand"] == "H&M"]
+    assert all(r["eligible_urls"] == 0 and r["note"] for r in no_inv)
 
 
 def test_over_eligible_flag():
