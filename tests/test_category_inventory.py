@@ -217,3 +217,85 @@ def test_walk_queues_nothing(tmp_path, monkeypatch):
     disc = ci.walk_discovery(_label)
     assert disc["counts"]["M&S"]["Socks"] == {"products": 2, "offers": 2}  # deduped across sections
     assert (tmp_path / "product_urls.txt").read_text(encoding="utf-8") == "https://x/queued\n"
+
+
+# --- URL-level counts (live_products / crawled_not_live_products) -------------
+
+def _url_inputs(rows, live=(), deferred=(), **extra):
+    return dict(live_ids=list(live), product_rows=rows, deferred_items=list(deferred),
+                skip_records=[], discovery=None, hm_status=None, site_sections=[],
+                label_for_name=_label, today=TODAY, **extra)
+
+
+def test_url_with_one_live_offer_is_live():
+    rows = [_row("T37000001", "Pijama Takımı", "NAVY", "34 (UK 6)"),
+            _row("T37000001", "Pijama Takımı", "NAVY", "36 (UK 8)")]
+    pj = ci.aggregate(**_url_inputs(rows, live=[ci.row_offer_id(rows[0])]))["brands"]["M&S"]["categories"]["Pajama"]
+    assert pj["live_products"] == 1
+    assert pj["crawled_not_live_products"] == 0
+    assert pj["crawled_not_live_offers"] == 1  # offer counts unchanged
+
+
+def test_url_with_only_not_live_in_stock_offers():
+    rows = [_row("T38000002", "Pamuklu Çorap", "BLACK", "35.5-38 (UK 3-5)"),
+            _row("T38000002", "Pamuklu Çorap", "BLACK", "39-42 (UK 6-8)", stock=0)]
+    socks = ci.aggregate(**_url_inputs(rows))["brands"]["M&S"]["categories"]["Socks"]
+    assert socks["crawled_not_live_products"] == 1 and socks["live_products"] == 0
+
+
+def test_url_out_of_stock_only_not_counted():
+    rows = [_row("T38000002", "Pamuklu Çorap", "BLACK", "35.5-38 (UK 3-5)", stock=0)]
+    socks = ci.aggregate(**_url_inputs(rows))["brands"]["M&S"]["categories"]["Socks"]
+    assert socks["crawled_not_live_products"] == 0 and socks["live_products"] == 0
+
+
+def test_url_deferred_or_submitted_today_counts_in_neither():
+    rows = [_row("T37000001", "Pijama Takımı", "NAVY", "34 (UK 6)"),
+            _row("T37000001", "Pijama Takımı", "NAVY", "36 (UK 8)"),
+            _row("T37000002", "Pijama Takımı", "BLUE", "34 (UK 6)")]
+    deferred = [{"offer_id": ci.row_offer_id(rows[0]), "type_id": TYPE_ID_PAJAMA}]
+    log = {"date": TODAY, "new_offer_ids": [ci.row_offer_id(rows[2])]}
+    pj = ci.aggregate(**_url_inputs(rows, deferred=deferred, new_items_log=log))[
+        "brands"]["M&S"]["categories"]["Pajama"]
+    assert pj["live_products"] == 0 and pj["crawled_not_live_products"] == 0
+    # yesterday's submissions no longer block the URL
+    log = {"date": "2026-11-23", "new_offer_ids": [ci.row_offer_id(rows[2])]}
+    pj = ci.aggregate(**_url_inputs(rows, deferred=deferred, new_items_log=log))[
+        "brands"]["M&S"]["categories"]["Pajama"]
+    assert pj["crawled_not_live_products"] == 1
+
+
+def test_url_with_many_sizes_and_colours_counts_once():
+    url = "https://x/pijama-1"
+    rows = []
+    for color in ("NAVY", "PINK"):
+        for size in ("34 (UK 6)", "36 (UK 8)", "38 (UK 10)"):
+            r = _row("T37000001", "Pijama Takımı", color, size)
+            r["url"] = url
+            rows.append(r)
+    rows.append({**_row("T37000003", "Pijama Takımı", "RED", "34 (UK 6)"), "url": ""})
+    data = ci.aggregate(**_url_inputs(rows))
+    pj = data["brands"]["M&S"]["categories"]["Pajama"]
+    assert pj["crawled_not_live_products"] == 1
+    assert pj["crawled_not_live_offers"] == 7
+    assert data["brands"]["M&S"]["crawled_no_url"] == 1
+    data = ci.aggregate(**_url_inputs(rows, live=[ci.row_offer_id(rows[4])]))
+    pj = data["brands"]["M&S"]["categories"]["Pajama"]
+    assert pj["live_products"] == 1 and pj["crawled_not_live_products"] == 0
+
+
+def test_url_counts_carry_over_when_products_csv_unreadable(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    prev = {"brands": {"M&S": {"categories": {"Pajama": {
+        "live_offers": 40, "crawled_not_live_offers": 12,
+        "live_products": 9, "crawled_not_live_products": 3}}}}}
+    (tmp_path / "category_inventory.json").write_text(json.dumps(prev), encoding="utf-8")
+    monkeypatch.setattr(ci, "read_products_csv", lambda path=None: (None, "locked"))
+    monkeypatch.setattr(ci, "live_offer_ids", lambda: [])
+    monkeypatch.setattr(ci, "read_quota", lambda: None)
+    data = ci.build()
+    pj = data["brands"]["M&S"]["categories"]["Pajama"]
+    assert pj["live_products"] == 9 and pj["crawled_not_live_products"] == 3
+    assert pj["live_offers"] == 40
+    assert data["brands"]["M&S"]["categories"]["Socks"]["live_products"] == 0
+    assert "carried over" in data["sources"]["products_csv"]

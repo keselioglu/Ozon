@@ -8,6 +8,15 @@ names, same as the plan's allocation keys):
   crawled_not_live_offers         in-stock crawled variants (products.csv) whose
                                   offer_id is not live, not deferred and not
                                   submitted today -- ready for an upload
+  live_products                   distinct products.csv URLs with at least
+                                  one offer live on Ozon
+  crawled_not_live_products       distinct products.csv URLs with at least one
+                                  in-stock mapped offer and NO offer that is
+                                  live, deferred or submitted today (a URL
+                                  with any offer on Ozon or in the pipeline
+                                  counts as added before). Rows with an empty
+                                  url are skipped and counted in the brand's
+                                  crawled_no_url.
   deferred_offers                 offers waiting in deferred_items.json
   upload_skips_7d                 distinct SKUs upload_to_ozon skipped in the
                                   last 7 days (upload_skipped.jsonl). Its lines
@@ -338,12 +347,13 @@ def aggregate(live_ids, product_rows, deferred_items, skip_records, discovery, h
     brands["H&M"] dict or None. site_sections: [{name, url, priority}].
     label_for_name: name -> category label or None."""
     labels = list(daily_plan.CATEGORY_LABELS.values())
-    cats = {lbl: {"live_offers": 0, "crawled_not_live_offers": 0, "deferred_offers": 0,
+    cats = {lbl: {"live_offers": 0, "crawled_not_live_offers": 0,
+                  "live_products": 0, "crawled_not_live_products": 0, "deferred_offers": 0,
                   "upload_skips_7d": 0, "discovered_not_live_products": 0,
                   "discovered_not_live_offers_est": 0, "last_discovery_walk": None,
                   "site_sections": []} for lbl in labels}
     ms = {"categories": cats, "live": 0, "live_unlabelled": 0, "unmapped_crawled": 0,
-          "crawled_size_unmapped": 0, "deferred_unlabelled": 0, "discovered_unmapped_products": 0,
+          "crawled_size_unmapped": 0, "crawled_no_url": 0, "deferred_unlabelled": 0, "discovered_unmapped_products": 0,
           "add_pipeline": True}
 
     name_cache = {}
@@ -410,6 +420,32 @@ def aggregate(live_ids, product_rows, deferred_items, skip_records, discovery, h
             cats[lbl]["crawled_not_live_offers"] += 1
         else:
             ms["unmapped_crawled"] += 1
+
+    # product URLs: live / crawled-not-live, one count per URL however many
+    # sizes or colours it has. Matched on row_offer_id() only.
+    urls = {}  # url -> {label, live, added, eligible}
+    for row in product_rows or []:
+        url = (row.get("url") or "").strip()
+        if not url:
+            ms["crawled_no_url"] += 1
+            continue
+        u = urls.setdefault(url, {"label": None, "live": False, "added": False, "eligible": False})
+        if u["label"] is None:
+            u["label"] = label(row.get("name"))
+        oid = row_offer_id(row)
+        if oid is not None and oid in live:
+            u["live"] = u["added"] = True
+        elif oid is not None and (oid in deferred_ids or oid in submitted_today):
+            u["added"] = True
+        elif oid is not None and _positive_stock(row):
+            u["eligible"] = True
+    for u in urls.values():
+        if u["label"] not in cats:
+            continue
+        if u["live"]:
+            cats[u["label"]]["live_products"] += 1
+        elif u["eligible"] and not u["added"]:
+            cats[u["label"]]["crawled_not_live_products"] += 1
 
     # upload skips, distinct SKUs per category
     skipped = {}
@@ -512,7 +548,7 @@ def write_atomic(data, path=OUT_FILE):
         raise
 
 
-CRAWL_FIELDS = ("live_offers", "crawled_not_live_offers")
+CRAWL_FIELDS = ("live_offers", "crawled_not_live_offers", "live_products", "crawled_not_live_products")
 
 
 def build(walk=False):
@@ -620,7 +656,9 @@ def main(argv=None):
     ms = data["brands"][MS]
     for lbl, c in ms["categories"].items():
         print(f"  {lbl:<14} live {c['live_offers']:>6}  crawled-not-live {c['crawled_not_live_offers']:>5}  "
-              f"deferred {c['deferred_offers']:>4}  discovered {c['discovered_not_live_products']:>4}")
+              f"deferred {c['deferred_offers']:>4}  discovered {c['discovered_not_live_products']:>4}  "
+              f"URLs live {c['live_products']:>5}  URLs crawled-not-live {c['crawled_not_live_products']:>4}")
+    print(f"  rows without a url: {ms['crawled_no_url']}")
     print(f"Wrote {OUT_FILE}.")
     return 0
 
