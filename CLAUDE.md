@@ -249,7 +249,7 @@ same unit as `daily_create`), not the whole 2000/day quota.
   `pythonw.exe` next to the interpreter that runs it, so run it with the
   Python that should open the app. Once the new shortcut exists, the
   installer removes the old `Ozon Daily Planner.lnk` from the Desktop (if
-  creating the new one fails, the old one is left alone). The app runs all network calls and
+  creating the new one fails, the old one is left alone). The window, its taskbar button and the shortcut use Ozon's own favicon, committed as `assets/ozon.ico` (multi-size) / `assets/ozon.png` and never fetched at runtime; a missing file just leaves the default icon, and re-running `install_desktop_shortcut.py` applies it to an existing shortcut. The app runs all network calls and
   subprocesses off the Tk main thread, so the window doesn't freeze.
 
 ## New product sources (`new_sources.py`)

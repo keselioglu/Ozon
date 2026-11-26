@@ -625,3 +625,117 @@ def test_last_planned_day_and_summary():
     assert ui.last_planned_day(plan, "2026-11-26") == (None, None)
     s = ui.quick_plan_summary({("M&S", "Dress"): 100}, {"limit": 2000, "usage": 93})
     assert "Total 100" in s and "+15 reserve" in s and "1,907 / 2,000" in s
+
+
+# --- app icon (task #145): Ozon's favicon from assets/ -------------------------
+
+def test_shortcut_uses_ozon_icon_when_present(monkeypatch, tmp_path):
+    import install_desktop_shortcut as inst
+    desktop, legacy, repo = _shortcut_env(monkeypatch, tmp_path)
+    (repo / "assets").mkdir()
+    (repo / "assets" / "ozon.ico").write_bytes(b"ico")
+    fake = _FakeRun(desktop / "Ozon Sales.lnk")
+    monkeypatch.setattr(inst.subprocess, "run", fake)
+    assert inst.main(["--repo", str(repo)]) == 0
+    ico = repo.resolve() / "assets" / "ozon.ico"
+    assert f"$s.IconLocation = '{ico},0'" in " ".join(fake.calls[0])
+
+
+def test_shortcut_icon_falls_back_to_pythonw(monkeypatch, tmp_path):
+    import install_desktop_shortcut as inst
+    desktop, legacy, repo = _shortcut_env(monkeypatch, tmp_path)
+    fake = _FakeRun(desktop / "Ozon Sales.lnk")
+    monkeypatch.setattr(inst.subprocess, "run", fake)
+    assert inst.main(["--repo", str(repo)]) == 0
+    assert f"$s.IconLocation = '{inst.pythonw_exe()},0'" in " ".join(fake.calls[0])
+    assert inst.icon_location(repo, r"C:\Py\pythonw.exe") == r"C:\Py\pythonw.exe,0"
+
+
+def test_build_ps_command_icon_param():
+    import install_desktop_shortcut as inst
+    args = (r"C:\d\x.lnk", r"C:\Py\pythonw.exe", r"C:\r\a.pyw", r"C:\r")
+    assert "$s.IconLocation = 'C:\\Py\\pythonw.exe,0'" in inst.build_ps_command(*args)
+    cmd = inst.build_ps_command(*args, icon=r"C:\r\assets\ozon.ico,0")
+    assert "$s.IconLocation = 'C:\\r\\assets\\ozon.ico,0'" in cmd
+
+
+def test_icon_assets_exist_and_are_multi_size():
+    from PIL import Image
+    with Image.open(os.path.join(ROOT, "assets", "ozon.ico")) as im:
+        assert im.format == "ICO"
+        sizes = set(im.info.get("sizes", []))
+    assert {(16, 16), (32, 32), (48, 48), (256, 256)} <= sizes
+    with Image.open(os.path.join(ROOT, "assets", "ozon.png")) as im:
+        assert im.format == "PNG" and im.size == (256, 256)
+    assert ui.APP_ICON_ICO.parts[-2:] == ("assets", "ozon.ico")
+    assert ui.APP_ICON_PNG.parts[-2:] == ("assets", "ozon.png")
+
+
+def test_app_sets_icon_and_taskbar_identity():
+    with open(APP_PATH, encoding="utf-8") as f:
+        src = f.read()
+    tree = ast.parse(src)
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "OzonSalesApp")
+    cls_src = ast.get_source_segment(src, cls)
+    assert "self._set_icon()" in cls_src
+    assert "iconbitmap(default=" in cls_src and "iconphoto(True" in cls_src
+    assert "SetCurrentProcessExplicitAppUserModelID" in src.split("def main():", 1)[1]
+
+
+class _IconRoot:
+    def __init__(self, fail=False):
+        self.fail, self.calls = fail, []
+
+    def iconbitmap(self, **kw):
+        self.calls.append(("iconbitmap", kw))
+        if self.fail:
+            raise RuntimeError("bad ico")
+
+    def iconphoto(self, default, img):
+        self.calls.append(("iconphoto", default))
+        if self.fail:
+            raise RuntimeError("bad png")
+
+
+class _IconTk:
+    def __init__(self, fail=False):
+        self.fail = fail
+
+    def PhotoImage(self, file):
+        if self.fail:
+            raise RuntimeError("bad png")
+        return object()
+
+
+def _icon_app(root, tk):
+    app = ui.OzonSalesApp.__new__(ui.OzonSalesApp)
+    app.root, app.tk = root, tk
+    return app
+
+
+def test_set_icon_missing_assets_keeps_default(monkeypatch, tmp_path):
+    monkeypatch.setattr(ui, "APP_ICON_ICO", tmp_path / "nope.ico")
+    monkeypatch.setattr(ui, "APP_ICON_PNG", tmp_path / "nope.png")
+    root = _IconRoot()
+    app = _icon_app(root, _IconTk())
+    app._set_icon()
+    assert root.calls == [] and app._icon_img is None
+
+
+def test_set_icon_broken_files_never_raise(monkeypatch, tmp_path):
+    (tmp_path / "ozon.ico").write_bytes(b"junk")
+    (tmp_path / "ozon.png").write_bytes(b"junk")
+    monkeypatch.setattr(ui, "APP_ICON_ICO", tmp_path / "ozon.ico")
+    monkeypatch.setattr(ui, "APP_ICON_PNG", tmp_path / "ozon.png")
+    app = _icon_app(_IconRoot(fail=True), _IconTk(fail=True))
+    app._set_icon()  # must not raise
+    assert app._icon_img is None
+
+
+def test_set_icon_uses_assets():
+    root = _IconRoot()
+    app = _icon_app(root, _IconTk())
+    app._set_icon()
+    assert ("iconphoto", True) in root.calls and app._icon_img is not None
+    if ui.sys.platform == "win32":
+        assert ("iconbitmap", {"default": str(ui.APP_ICON_ICO)}) in root.calls

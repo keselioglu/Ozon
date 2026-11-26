@@ -1401,6 +1401,10 @@ def sources_warnings(snap):
 # --- Tabs (pure registration hook; no tkinter at module level) --------------------
 
 APP_TITLE = "Ozon Sales"
+# Ozon's own favicon, committed under assets/ (never fetched at runtime).
+APP_ICON_ICO = HERE / "assets" / "ozon.ico"
+APP_ICON_PNG = HERE / "assets" / "ozon.png"
+APP_USER_MODEL_ID = "OzonSales.App"  # own taskbar group, so Windows shows our icon, not pythonw's
 TAB_OVERVIEW = "Overview"
 TAB_DAILY = "Daily tasks"
 TAB_PRIORITIZATION = "New Product Adding"
@@ -3141,6 +3145,7 @@ class OzonSalesApp(_WidgetHelpers):
 
         self.root = tk.Tk()
         self.root.title(APP_TITLE)
+        self._set_icon()
         self.root.configure(bg=BG)
         self.dpi = max(1.0, self.root.winfo_fpixels("1i") / 96.0)  # DPI-aware: scale pixel sizes
         self.root.geometry(f"{self.px(1180)}x{self.px(780)}")
@@ -3212,6 +3217,24 @@ class OzonSalesApp(_WidgetHelpers):
         s.map("TNotebook.Tab", background=[("selected", CARD), ("active", "#4a4a46")],
               foreground=[("selected", FG)], lightcolor=[("selected", CARD)])
 
+    def _set_icon(self):
+        """Ozon favicon for the title bar, taskbar and every Toplevel (e.g. the
+        'Add a new website' dialog). A missing or broken file just keeps Tk's
+        default icon; it never stops the window opening."""
+        self._icon_img = None
+        try:
+            if sys.platform == "win32" and APP_ICON_ICO.is_file():
+                self.root.iconbitmap(default=str(APP_ICON_ICO))  # default= also covers Toplevels
+        except Exception as e:
+            print(f"App icon not set from {APP_ICON_ICO.name}: {e}")
+        try:
+            if APP_ICON_PNG.is_file():
+                self._icon_img = self.tk.PhotoImage(file=str(APP_ICON_PNG))
+                self.root.iconphoto(True, self._icon_img)  # keep the reference on self
+        except Exception as e:
+            self._icon_img = None
+            print(f"App icon not set from {APP_ICON_PNG.name}: {e}")
+
     def run(self):
         self.root.mainloop()
 
@@ -3223,6 +3246,11 @@ def main():
     try:  # crisp text on scaled displays
         import ctypes
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+    try:  # own taskbar identity, so the button shows the Ozon icon instead of pythonw's
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
     except Exception:
         pass
     os.chdir(HERE)

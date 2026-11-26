@@ -1,7 +1,10 @@
 """
 Creates (or refreshes) %USERPROFILE%\\Desktop\\Ozon Sales.lnk, which opens
 the tabbed "Ozon Sales" app (planner_ui.pyw) with the pythonw.exe next to
-this interpreter.
+this interpreter. The shortcut's icon is Ozon's favicon (assets/ozon.ico in
+the repo); if that file is missing it falls back to pythonw.exe's icon.
+Re-running this on an existing shortcut applies the new icon (Explorer may
+show the cached old icon until it refreshes).
 
 Uses the WScript.Shell COM object via `powershell -NoProfile -Command`, so
 no extra Python packages are needed. Only after the new shortcut exists are
@@ -24,6 +27,7 @@ from pathlib import Path
 SHORTCUT_NAME = "Ozon Sales.lnk"
 LEGACY_SHORTCUT_NAMES = ("Ozon Daily Planner.lnk",)
 APP_FILE = "planner_ui.pyw"
+ICON_FILE = Path("assets") / "ozon.ico"
 
 
 def shortcut_path(name=SHORTCUT_NAME):
@@ -44,14 +48,20 @@ def _ps_quote(s):
     return "'" + str(s).replace("'", "''") + "'"
 
 
-def build_ps_command(lnk, target, app, workdir):
+def icon_location(repo, target):
+    """IconLocation for the shortcut: the repo's Ozon .ico, else the target exe."""
+    ico = Path(repo) / ICON_FILE
+    return f"{ico},0" if ico.is_file() else f"{target},0"
+
+
+def build_ps_command(lnk, target, app, workdir, icon=None):
     return "; ".join([
         "$ErrorActionPreference = 'Stop'",
         "$s = (New-Object -ComObject WScript.Shell).CreateShortcut(" + _ps_quote(lnk) + ")",
         "$s.TargetPath = " + _ps_quote(target),
         "$s.Arguments = " + _ps_quote(f'"{app}"'),
         "$s.WorkingDirectory = " + _ps_quote(workdir),
-        "$s.IconLocation = " + _ps_quote(f"{target},0"),
+        "$s.IconLocation = " + _ps_quote(icon or f"{target},0"),
         "$s.Description = 'Ozon Sales (M&S -> Ozon sales app: overview, daily tasks, prioritization)'",
         "$s.Save()",
     ])
@@ -70,7 +80,8 @@ def main(argv=None):
         return 1
     lnk = shortcut_path()
     lnk.parent.mkdir(parents=True, exist_ok=True)
-    cmd = build_ps_command(lnk, pythonw_exe(), app, repo)
+    target = pythonw_exe()
+    cmd = build_ps_command(lnk, target, app, repo, icon=icon_location(repo, target))
     p = subprocess.run(["powershell", "-NoProfile", "-Command", cmd], capture_output=True, text=True)
     if p.returncode != 0 or not lnk.exists():
         print(f"Could not create the shortcut: {(p.stderr or p.stdout).strip()}")
