@@ -131,6 +131,12 @@ def targets_for_today(today, test_products=None):
     return remaining, want, open_brands
 
 
+def _weight(remaining, brand, label):
+    import product_rules as pr
+    rules = remaining.get("rules")
+    return pr.WEIGHTS[pr.priority_of(rules, brand, label)] if rules else 0
+
+
 def price_ok(cost_try, remaining):
     import product_rules as pr
     rules = remaining.get("rules")
@@ -611,6 +617,11 @@ def run(dry_run=False, today=None, test_products=None):
 
     log("Picking whole products and building Ozon items...")
     chosen, spares = pick_and_build(ms_found, hm_found, want, open_brands, remaining, dry_run, report)
+    if test_products and len(chosen) > test_products:
+        # test runs: exactly N products (best priority first); the rest stay spare for failed imports
+        chosen.sort(key=lambda e: -_weight(remaining, e[0], e[1]))
+        spares = chosen[test_products:] + spares
+        chosen = chosen[:test_products]
     items = [it for (_b, _l, its, _s) in chosen for it in its]
     sel = Counter()
     for b, l, its, _s in chosen:
