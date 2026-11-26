@@ -71,11 +71,33 @@ def pack_count(name):
     return 1
 
 
+# Added 2026-11-26: one underwear-sized package for every type got a padded bomber jacket
+# rejected by Ozon with ML_INCORRECT_VOLUME_WEIGHT ("dimensions or weight differ strongly from
+# similar products"). Folded-garment estimates per type (grams, cm); underwear/socks unchanged.
+from ozon_mapping import (TYPE_ID_BLOUSE, TYPE_ID_DRESS, TYPE_ID_JACKET, TYPE_ID_PAJAMA,  # noqa: E402
+                          TYPE_ID_SKIRT, TYPE_ID_SWEATER, TYPE_ID_TANK_TOP, TYPE_ID_TOP,
+                          TYPE_ID_TROUSERS, TYPE_ID_TSHIRT)
+TYPE_DIMS = {
+    TYPE_ID_TANK_TOP: {"weight": 150, "depth": 25, "width": 20, "height": 2},
+    TYPE_ID_TSHIRT: {"weight": 200, "depth": 25, "width": 20, "height": 3},
+    TYPE_ID_TOP: {"weight": 200, "depth": 25, "width": 20, "height": 3},
+    TYPE_ID_BLOUSE: {"weight": 250, "depth": 30, "width": 25, "height": 3},
+    TYPE_ID_SKIRT: {"weight": 300, "depth": 30, "width": 25, "height": 4},
+    TYPE_ID_DRESS: {"weight": 400, "depth": 35, "width": 25, "height": 5},
+    TYPE_ID_PAJAMA: {"weight": 400, "depth": 30, "width": 25, "height": 5},
+    TYPE_ID_TROUSERS: {"weight": 500, "depth": 35, "width": 25, "height": 5},
+    TYPE_ID_SWEATER: {"weight": 500, "depth": 35, "width": 25, "height": 6},
+    TYPE_ID_JACKET: {"weight": 900, "depth": 40, "width": 30, "height": 8},
+}
+
+
 def package_dimensions(name):
     count = pack_count(name)
-    dims = dict(SINGLE_ITEM_DIMS)
+    type_id = resolve_category_and_type(name, False)[1]
+    dims = dict(TYPE_DIMS.get(type_id, SINGLE_ITEM_DIMS))
     if count > 1:
-        dims["weight"] += PER_EXTRA_ITEM_WEIGHT * (count - 1)
+        extra = PER_EXTRA_ITEM_WEIGHT if type_id not in TYPE_DIMS else dims["weight"]
+        dims["weight"] += extra * (count - 1)
         dims["depth"] += 2 * (count - 1)  # packs are a bit bulkier, not linearly taller
     return dims
 
