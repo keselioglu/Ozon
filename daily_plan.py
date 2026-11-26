@@ -45,6 +45,20 @@ PRODUCTS_CSV = "products.csv"
 PLAN_VERSION = 1
 DEFAULT_TOTAL = 500
 MAX_TOTAL = 2000  # Ozon's daily_create limit -- a plan above it is meaningless.
+# Owner instruction 2026-11-26: always prepare 15% more products, kept separate, used only to
+# complete the day's target (categories that came up short, offers Ozon did not import).
+# The reserve never takes the day above its target.
+RESERVE_PCT = 0.15
+
+
+def reserve_for(total):
+    """Reserve offers prepared on top of a day's target (ceil 15%, 0 for a 0 day)."""
+    import math
+    try:
+        total = int(total or 0)
+    except (TypeError, ValueError):
+        return 0
+    return math.ceil(total * RESERVE_PCT) if total > 0 else 0
 
 CATEGORY_LABELS = {
     TYPE_ID_PANTIES: "Underwear",

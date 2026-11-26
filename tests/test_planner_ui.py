@@ -541,3 +541,44 @@ def test_roll_day_moves_today_and_auto_day_forward(monkeypatch):
     tab.today, tab.day_key = "2026-11-25", "2026-11-25"
     ui.PrioritizationTab._roll_day(tab)
     assert tab.day_key >= "2026-11-26"
+
+
+def test_next_new_products_day():
+    from datetime import datetime, timezone
+    late = datetime(2026, 11, 26, 7, 0, tzinfo=timezone.utc)
+    assert ui.next_new_products_day({"date": "2026-11-26"}, late) == "2026-11-27"
+    early = datetime(2026, 11, 26, 0, 10, tzinfo=timezone.utc)
+    assert ui.next_new_products_day({"date": "2026-11-25"}, early) == "2026-11-26"   # tonight's run not done yet
+    assert ui.next_new_products_day({"date": "2026-11-26"}, early) == "2026-11-27"
+
+
+def test_new_products_metrics_shows_plan_reserve_quota_last_run():
+    panel = {"next_day": "2026-11-27",
+             "next_plan": {"total": 100, "allocations": {"M&S": {"Dress": 60}, "H&M": {"Top": 40}}},
+             "reserve": 15, "quota": {"limit": 2000, "usage": 93},
+             "last": {"date": "2026-11-26", "state": "completed", "plan": {"total": 100},
+                      "created": {"M&S/Dress": 50, "H&M/Top": 43}, "failed": {}}}
+    metrics, note, level = ui.new_products_metrics(panel)
+    values = {lbl: v for lbl, v, _ in metrics}
+    assert values["Next run plan (2026-11-27)"] == "100 offers"
+    assert values["Reserve +15% (separate)"] == "15 offers"
+    assert values["Today's Ozon quota left"] == "1907 / 2000"
+    assert "created 93 / 100" in values["Last run (2026-11-26)"]
+    assert "M&S Dress 60" in note and "H&M Top 40" in note
+
+
+def test_new_products_metrics_zero_plan_warns():
+    metrics, note, level = ui.new_products_metrics({"next_day": "2026-11-27", "next_plan": {"total": 0},
+                                                    "quota": None, "last": {}})
+    assert metrics[0][2] == "warning" and "nothing planned" in metrics[0][1]
+    assert metrics[2][1] == "quota read failed"
+    assert level == "warning" and "set the plan" in note
+
+
+def test_task_section_uses_new_products_panel():
+    st = {"today": "2026-11-26", "tasks": [{"name": "\\OzonSales_DailyNewProducts", "next_run": "27.11.2026 03:00:00"}],
+          "new_products": {"next_day": "2026-11-27", "next_plan": {"total": 10}, "reserve": 2,
+                           "quota": {"limit": 2000, "usage": 0}, "last": {}}}
+    secs = ui.build_task_sections(st)
+    assert secs[0]["title"] == "New products upload"
+    assert secs[0]["metrics"][0][1] == "10 offers"

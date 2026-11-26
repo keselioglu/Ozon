@@ -73,7 +73,7 @@ import queue
 import subprocess
 import sys
 import threading
-from datetime import date as _date, datetime, timedelta
+from datetime import date as _date, datetime, timedelta, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -677,6 +677,7 @@ TASK_DISPLAY_NAMES = {
     "OzonSales_DailyStockUpdate": "MS stock update",
     "OzonSales_DailyHMStockUpdate": "H&M stock update",
     "OzonSales_DailyPriceUpdate": "Price update",
+    "OzonSales_DailyNewProducts": "New products upload",
 }
 _TASK_DISPLAY_FOLDED = {k.casefold(): v for k, v in TASK_DISPLAY_NAMES.items()}
 
@@ -755,6 +756,74 @@ def _metric_key(name):
         return None
 
 
+NEW_PRODUCTS_TASK = "ozonsales_dailynewproducts"
+NEW_PRODUCTS_STATUS_FILE = "new_products_status.json"
+
+
+def next_new_products_day(last_status, utc_now=None):
+    """UTC plan date the next 03:00 Moscow (00:00 UTC) run will use: today while today's run
+    hasn't happened yet (00:00-01:00 UTC, no status for today), otherwise tomorrow."""
+    utc_now = utc_now or datetime.now(timezone.utc)
+    today = utc_now.date()
+    ran_today = _text(_as_dict(last_status).get("date")) == today.isoformat()
+    if utc_now.hour < 1 and not ran_today:
+        return today.isoformat()
+    return (today + timedelta(days=1)).isoformat()
+
+
+def collect_new_products_panel(utc_now=None, repo=HERE):
+    """Worker thread: what the new-products card shows. Local files + one read-only quota call."""
+    last = load_json(Path(repo) / NEW_PRODUCTS_STATUS_FILE, {}) or {}
+    plan = daily_plan.load_plan(str(Path(repo) / PLAN_FILE))
+    day_key = next_new_products_day(last, utc_now)
+    day = daily_plan.plan_for_date(plan, day_key)
+    return {"last": last, "next_day": day_key, "next_plan": day,
+            "reserve": daily_plan.reserve_for(day.get("total")), "quota": read_quota()}
+
+
+def _plan_split_text(day):
+    parts = [f"{b} {lbl} {n}" for b, cats in ((day or {}).get("allocations") or {}).items()
+             for lbl, n in (cats or {}).items() if n]
+    return " · ".join(parts)
+
+
+def new_products_metrics(panel):
+    """-> ([(label, value, level)] x6, note, note_level) for the new-products card. Pure."""
+    p = _as_dict(panel)
+    day = _as_dict(p.get("next_plan"))
+    total = day.get("total") or 0
+    nd = _text(p.get("next_day")) or "?"
+    q = p.get("quota") if isinstance(p.get("quota"), dict) else None
+    last = _as_dict(p.get("last"))
+    created = sum(v for v in _as_dict(last.get("created")).values() if isinstance(v, int))
+    last_plan = _as_dict(last.get("plan")).get("total")
+    rs = _as_dict(last.get("reserve"))
+    metrics = [
+        (f"Next run plan ({nd})", f"{total} offers" if total else "0 -- nothing planned",
+         "good" if total else "warning"),
+        ("Reserve +15% (separate)", f"{p.get('reserve') or 0} offers" if total else DASH,
+         "good" if total else "muted"),
+        ("Today's Ozon quota left",
+         f"{q['limit'] - q['usage']} / {q['limit']}" if q else "quota read failed",
+         ("good" if q["limit"] - q["usage"] >= total else "warning") if q else "warning"),
+        (f"Last run ({_text(last.get('date')) or '?'})",
+         f"{_text(last.get('state')) or 'never'} · created {created}"
+         + (f" / {last_plan}" if last_plan is not None else ""),
+         "good" if _text(last.get("state")) == "completed" else ("muted" if not last else "warning")),
+        ("Not imported", fmt_num(len(_as_dict(last.get("failed")))) if last else DASH,
+         "good" if last and not last.get("failed") else ("muted" if not last else "warning")),
+        ("Reserve used (short / failed)",
+         f"{rs.get('used_for_shortfall', 0)} / {rs.get('used_for_failed_imports', 0)}" if rs else DASH,
+         "good" if rs else "muted"),
+    ]
+    split = _plan_split_text(day)
+    note = f"{nd}: {split}" if split else (f"{nd}: no categories set -- set the plan in New Product Adding"
+                                           if not total else None)
+    if last.get("error"):
+        return metrics, f"last run error: {_text(last['error'])[:200]}", "critical"
+    return metrics, note, ("muted" if split else "warning")
+
+
 def build_task_sections(status, now=None):
     """One section per status['tasks'] entry (build_task_rows order):
     {title, task_name, next_run, last_run, result, level,
@@ -774,7 +843,9 @@ def build_task_sections(status, now=None):
                 text = fmt_num(value)
                 metrics.append((label, text, "muted" if text == DASH else "good"))
             note, note_level = None, None
-            if entry:
+            if _fold(row.get("task_name")).replace("/", "\\").split("\\")[-1] == NEW_PRODUCTS_TASK:
+                metrics, note, note_level = new_products_metrics(st.get("new_products"))
+            elif entry:
                 when = _metric_date(key, entry)
                 if when and today and when != today:
                     note = f"counts from {when} (latest run not recorded)"
@@ -957,6 +1028,10 @@ def collect_daily_status():
     try:
         result = task_status.collect_status()
         if isinstance(result, dict):
+            try:
+                result["new_products"] = collect_new_products_panel()
+            except Exception as e:
+                result.setdefault("errors", []).append(f"new products panel: {type(e).__name__}: {e}")
             return result
         error = f"collect_status returned {type(result).__name__}, not a dict"
     except Exception as e:
@@ -2226,7 +2301,10 @@ class PrioritizationTab(_WidgetHelpers):
     def render_editor(self):
         s = allocation_sum(self.day)
         total = self.day["total"]
-        self.sum_label.configure(text=f"Allocated {s:,} / {total:,}",
+        reserve = daily_plan.reserve_for(total)
+        self.sum_label.configure(text=f"Allocated {s:,} / {total:,}"
+                                      + (f"  ·  +{reserve:,} reserve (15%, only to complete the target)"
+                                         if reserve else ""),
                                  fg=STATUS["critical"] if s > total else FG)
         errors = plan_errors(set_day(self.plan, self.day_key, self.day))
         self.save_btn.configure(state="disabled" if errors else "normal")

@@ -14,7 +14,9 @@ Steps (each logged; any failure stops before the upload and is reported):
      products not on Ozon -> crawl each page fresh (today's price and stock)
   3. H&M: read the planned H&M sections live (hm_site, same Chrome profile as the 02:00 H&M
      stock job) -> products not on Ozon, in H&M's own ranking order -> product page details
-  4. pick whole products per category until the plan is covered
+  4. pick whole products per category until the plan is covered; build a separate reserve of
+     +15% (daily_plan.reserve_for) from products past their category's allocation -- used only
+     to complete the day's total (short categories now, failed imports after step 8)
   5. translate only the picked products that have no translation yet (auto_translate)
   6. build Ozon items (same builders/rules as the existing uploads), drop offer_ids that
      already exist on Ozon and any offer_id that appears twice (ambiguous -> skip)
@@ -106,8 +108,10 @@ def labels_for(brand, want, open_brands):
 
 
 def needed(brand, label, want, remaining):
-    n = want.get((brand, label))
-    return n if n else remaining["total"]
+    """Offers to look for in one category: its allocation (or the day's total) plus the 15%
+    reserve share, so spare products exist to complete the target."""
+    n = want.get((brand, label)) or remaining["total"]
+    return n + daily_plan.reserve_for(n)
 
 
 # --- 2. M&S candidates -----------------------------------------------------------------------
@@ -277,11 +281,16 @@ def translate(brand, article, name, specs_json, dry_run, client_box):
 
 def pick_and_build(ms_found, hm_found, want, open_brands, remaining, dry_run, report):
     """Whole products, category by category, in priority order, until each category's
-    allocation (and the day's total) is covered. -> list of (brand, label, items, source)."""
+    allocation (and the day's total) is covered. Products past a category's allocation are
+    built as the reserve (daily_plan.reserve_for, 15% of the day) -- kept separate and used
+    only to complete the day's total: first for categories that came up short, later
+    (run()) for offers Ozon did not import.
+    -> (chosen, spares), both lists of (brand, label, items, source)."""
     import hm_catalog as hc
     import upload_to_ozon as u
     from upload_to_ozon import find_existing_offer_ids
     total_left = remaining["total"]
+    reserve_left = daily_plan.reserve_for(remaining.get("plan_total") or remaining["total"])
     per_left = {k: v for k, v in want.items()}
     client_box = {}
     dup_checks = (u.fetch_live_article_codes_by_prefix(), u.fetch_live_offer_ids_by_article()) if ms_found else ({}, {})
@@ -289,16 +298,15 @@ def pick_and_build(ms_found, hm_found, want, open_brands, remaining, dry_run, re
              [("H&M", lbl, hm_found.get(lbl, [])) for lbl in hm_found]
     # allocated categories first, then (fill_remainder) the open ones
     queues.sort(key=lambda q: 0 if (q[0], q[1]) in per_left else 1)
-    chosen, skipped = [], Counter()
+    chosen, spares, skipped = [], [], Counter()
     for brand, label, products in queues:
         key = (brand, label)
         for p in products:
-            if total_left <= 0:
-                break
             cap = per_left.get(key)
-            if cap is not None and cap <= 0:
-                break
             if cap is None and brand not in open_brands:
+                break
+            main_open = total_left > 0 and (cap is None or cap > 0)
+            if not main_open and reserve_left <= 0:
                 break
             if brand == "M&S":
                 art = p["rows"][0].get("ms_article_code")
@@ -328,15 +336,48 @@ def pick_and_build(ms_found, hm_found, want, open_brands, remaining, dry_run, re
                 skipped["two sizes map to the same offer_id (ambiguous)"] += 1
                 continue
             n = len(items)
-            if n > total_left or (cap is not None and n > cap):
+            entry = (brand, label, items, p.get("url") or p.get("rec", {}).get("article"))
+            if main_open and n <= total_left and (cap is None or n <= cap):
+                chosen.append(entry)
+                total_left -= n
+                if cap is not None:
+                    per_left[key] = cap - n
+            elif reserve_left > 0:
+                spares.append(entry)
+                reserve_left -= n
+            else:
                 skipped["does not fit in what is left of the plan"] += 1
-                continue
-            chosen.append((brand, label, items, p.get("url") or p.get("rec", {}).get("article")))
+    # Reserve, step 1: categories came up short -> complete the day's total from the spares.
+    used = 0
+    for entry in list(spares):
+        if total_left <= 0:
+            break
+        n = len(entry[2])
+        if n <= total_left:
+            chosen.append(entry)
+            spares.remove(entry)
             total_left -= n
-            if cap is not None:
-                per_left[key] = cap - n
+            used += n
     report["skipped_at_build"] = dict(skipped)
-    return chosen
+    report["reserve"] = {"planned": daily_plan.reserve_for(remaining.get("plan_total") or remaining["total"]),
+                         "built": used + sum(len(e[2]) for e in spares),
+                         "used_for_shortfall": used, "used_for_failed_imports": 0}
+    return chosen, spares
+
+
+def take_spares(spares, n_needed):
+    """Whole spare products (in order) adding up to at most n_needed offers; removes them
+    from spares. -> list of entries."""
+    out = []
+    for entry in list(spares):
+        n = len(entry[2])
+        if n <= n_needed:
+            out.append(entry)
+            spares.remove(entry)
+            n_needed -= n
+        if n_needed <= 0:
+            break
+    return out
 
 
 # --- 7-8. upload, wait, stock ---------------------------------------------------------------
@@ -475,7 +516,7 @@ def run(dry_run=False, today=None):
             hm_found = hm_candidates(hm_labels, want, remaining, report, hm)
 
     log("Picking whole products and building Ozon items...")
-    chosen = pick_and_build(ms_found, hm_found, want, open_brands, remaining, dry_run, report)
+    chosen, spares = pick_and_build(ms_found, hm_found, want, open_brands, remaining, dry_run, report)
     items = [it for (_b, _l, its, _s) in chosen for it in its]
     sel = Counter()
     for b, l, its, _s in chosen:
@@ -483,7 +524,10 @@ def run(dry_run=False, today=None):
     report["selected"] = dict(sel)
     report["selected_products"] = [{"brand": b, "category": l, "source": s, "offers": [i["offer_id"] for i in its],
                                     "price_usd": its[0]["price"], "name": its[0]["name"]} for b, l, its, s in chosen]
+    rs = report["reserve"]
     log(f"Selected {len(items)} offer(s) from {len(chosen)} product(s): {dict(sel)}")
+    log(f"Reserve (+15%): planned {rs['planned']}, built {rs['built']}, used for short categories "
+        f"{rs['used_for_shortfall']}, {sum(len(e[2]) for e in spares)} spare offer(s) kept for failed imports")
     if dry_run:
         report["state"] = "dry_run_ok"
         return report
@@ -491,14 +535,33 @@ def run(dry_run=False, today=None):
         report["state"] = "nothing_found"
         return report
 
-    chosen_urls = {s for b, _l, _i, s in chosen if b == "M&S"}
-    save_ms_rows([p for lst in ms_found.values() for p in lst if p["url"] in chosen_urls])
-    log_new_items(items, today)
-    log(f"Uploading {len(items)} new offer(s)...")
-    task_ids = upload(items)
-    status, errors = wait_for_import(task_ids)
+    def send(entries):
+        its = [it for (_b, _l, x, _s) in entries for it in x]
+        urls = {s for b, _l, _i, s in entries if b == "M&S"}
+        save_ms_rows([p for lst in ms_found.values() for p in lst if p["url"] in urls])
+        log_new_items(its, today)
+        log(f"Uploading {len(its)} new offer(s)...")
+        st, er = wait_for_import(upload(its))
+        return its, st, er
+
+    items, status, errors = send(chosen)
     ok = [it for it in items if status.get(it["offer_id"]) == "imported"]
     bad = [it for it in items if status.get(it["offer_id"]) != "imported"]
+    # Reserve, step 2: replace offers Ozon did not import with spare products (once).
+    if bad and spares:
+        extra = take_spares(spares, len(bad))
+        if extra:
+            log(f"{len(bad)} offer(s) not imported -- uploading {sum(len(e[2]) for e in extra)} reserve offer(s) instead")
+            x_items, x_status, x_errors = send(extra)
+            status.update(x_status)
+            errors.update(x_errors)
+            items += x_items
+            ok += [it for it in x_items if x_status.get(it["offer_id"]) == "imported"]
+            bad += [it for it in x_items if x_status.get(it["offer_id"]) != "imported"]
+            rs["used_for_failed_imports"] = len(x_items)
+            for b, l, its, _s in extra:
+                sel[f"{b}/{l}"] += len(its)
+            report["selected"] = dict(sel)
     for it in ok:
         k = f"{daily_plan.brand_for_offer_id(it['offer_id'])}/{daily_plan.category_label_for_type(it['type_id'])}"
         report["created"][k] = report["created"].get(k, 0) + 1
@@ -556,6 +619,11 @@ def main(argv=None):
             text = (f"Ozon new products {report['date']}: {report.get('state')}\n"
                     f"created {created} offer(s): {report.get('created') or '-'}\n"
                     f"not imported: {len(report.get('failed') or {})}")
+            rs = report.get("reserve") or {}
+            if rs:
+                text += (f"\nreserve +15%: {rs.get('built', 0)}/{rs.get('planned', 0)} built, used "
+                         f"{rs.get('used_for_shortfall', 0)} for short categories, "
+                         f"{rs.get('used_for_failed_imports', 0)} for failed imports")
             if report.get("error"):
                 text += f"\nerror: {report['error'][:300]}"
             telegram(text)
