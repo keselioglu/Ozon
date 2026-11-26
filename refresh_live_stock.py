@@ -71,7 +71,7 @@ WRONG_URL_LOG = "stock_refresh_wrong_url.jsonl"
 UNMATCHED_SUMMARY_FILE = "unmatched_offer_ids.txt"
 WRONG_URL_SUMMARY_FILE = "wrong_url_offer_ids.txt"
 # One JSON line per run: pages/products checked and how stock moved vs. what
-# Ozon held just before the push. Read by C:\Git\_dashboard. Reporting only —
+# Ozon held just before the push. Read by the app's Daily tasks tab. Reporting only —
 # any failure building it is logged and never blocks the actual stock push.
 STOCK_SUMMARY_HISTORY = "stock_update_history.jsonl"
 

@@ -41,7 +41,7 @@ SAFETY — runs unattended at 05:00, so it refuses to push when inputs look wron
   * Dry run by default. Only `--apply` writes to Ozon.
 
 Appends one JSON line per applied run to price_update_history.jsonl (read by
-the C:\\Git\\_dashboard dashboard).
+the Ozon Sales app's Daily tasks tab via task_status.py).
 """
 import argparse
 import json
