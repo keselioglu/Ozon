@@ -674,14 +674,70 @@ def run(dry_run=False, today=None, test_products=None):
                         for it in bad}
     log(f"Ozon import: {len(ok)} imported, {len(bad)} not imported")
 
-    if ok:
+    def push_stock(its):
         import update_stocks as us
-        updates = [{"offer_id": it["offer_id"], "stock": it["_stock"]} for it in ok]
+        updates = [{"offer_id": it["offer_id"], "stock": it["_stock"]} for it in its]
         log(f"Pushing stock for the {len(updates)} new offer(s) only...")
         us.push_stock_updates_for(updates)
-        report["stock_pushed"] = len(updates)
-    report["state"] = "completed" if not bad else "completed_with_errors"
+        report["stock_pushed"] = report.get("stock_pushed", 0) + len(updates)
+
+    def count_rejected(its):
+        rej = rejected_after_import([it["offer_id"] for it in its])
+        for it in its:
+            if it["offer_id"] in rej:
+                k = (f"{daily_plan.brand_for_offer_id(it['offer_id'])}/"
+                     f"{daily_plan.category_label_for_type(it['type_id'])}")
+                report["created"][k] -= 1
+                if not report["created"][k]:
+                    del report["created"][k]
+        report.setdefault("rejected", {}).update(rej)
+        return rej
+
+    if ok:
+        push_stock(ok)
+        # Reserve, step 3 (added 2026-11-26, real test 2): an offer can be imported and still be
+        # refused at moderation (e.g. SPU_ALREADY_EXISTS_IN_ANOTHER_ACCOUNT). Those never go on
+        # sale, so they don't count as created and are replaced with spare products once.
+        rej = count_rejected(ok)
+        if rej:
+            log(f"{len(rej)} imported offer(s) rejected by Ozon after moderation: "
+                f"{sorted({c for v in rej.values() for c in v})}")
+            extra = take_spares(spares, len(rej))
+            if extra:
+                log(f"Uploading {sum(len(e[2]) for e in extra)} reserve offer(s) instead")
+                x_items, x_status, _x_errors = send(extra)
+                x_ok = [it for it in x_items if x_status.get(it["offer_id"]) == "imported"]
+                for it in x_ok:
+                    k = (f"{daily_plan.brand_for_offer_id(it['offer_id'])}/"
+                         f"{daily_plan.category_label_for_type(it['type_id'])}")
+                    report["created"][k] = report["created"].get(k, 0) + 1
+                rs["used_for_failed_imports"] += len(x_items)
+                if x_ok:
+                    push_stock(x_ok)
+                    count_rejected(x_ok)
+    bad_any = bad or report.get("rejected")
+    report["state"] = "completed" if not bad_any else "completed_with_errors"
     return report
+
+
+def rejected_after_import(offer_ids):
+    """-> {offer_id: [error codes]} for new offers Ozon refused to create (card not created and
+    an ERROR-level error, e.g. SPU_ALREADY_EXISTS_IN_ANOTHER_ACCOUNT, ML_INCORRECT_VOLUME_WEIGHT).
+    Offers still waiting for moderation have no errors and are not counted. Read-only."""
+    from ozon_client import call
+    out = {}
+    for i in range(0, len(offer_ids), 1000):
+        try:
+            items = call("/v3/product/info/list", {"offer_id": offer_ids[i:i + 1000]}).get("items", [])
+        except Exception as e:
+            log(f"  card check failed: {e}")
+            continue
+        for it in items:
+            st = it.get("statuses") or {}
+            errs = [e for e in it.get("errors") or [] if e.get("level") == "ERROR_LEVEL_ERROR"]
+            if errs and not st.get("is_created", True):
+                out[it["offer_id"]] = sorted({e.get("code") or "?" for e in errs})
+    return out
 
 
 def main(argv=None):
@@ -727,6 +783,9 @@ def main(argv=None):
             text = (("TEST " if a.test else "") + f"Ozon new products {report['date']}: {report.get('state')}\n"
                     f"created {created} offer(s): {report.get('created') or '-'}\n"
                     f"not imported: {len(report.get('failed') or {})}")
+            if report.get("rejected"):
+                codes = sorted({c for v in report["rejected"].values() for c in v})
+                text += f"\nrejected by Ozon after moderation: {len(report['rejected'])} {codes}"
             rs = report.get("reserve") or {}
             if rs:
                 text += (f"\nreserve +15%: {rs.get('built', 0)}/{rs.get('planned', 0)} built, used "
