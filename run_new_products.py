@@ -79,8 +79,25 @@ def targets_for_today(today):
     open_brands) -- open_brands: brands that may take any category (fill_remainder with no
     allocation for them)."""
     from upload_to_ozon import check_quota
-    plan = daily_plan.load_plan()
-    day = daily_plan.plan_for_date(plan, today)
+    import product_rules as pr
+    rules, cached = None, {}
+    if pr.rules_exist():
+        # Owner rules (app: New Product Adding): daily number, price limits, priorities -- the
+        # last saved ones decide now. The split per category comes from the cached data; the
+        # site may differ a little, the reserve covers that.
+        rules = pr.load_rules()
+        candidates = pr.load_candidates()
+        day, preview = pr.plan_day_from_rules(rules, candidates)
+        plan = {"version": 1, "default": day, "overrides": {}}
+        for c in candidates:
+            if not pr.price_block(c.get("cost_try"), rules):
+                cached.setdefault((c["brand"], c["label"]), []).append(c)
+        log(f"Rules: daily {rules['daily_offers']}, min sale ${rules['min_sale_usd']}, max cost "
+            f"{rules['max_cost_try']} TL, non-medium priorities {rules.get('priorities') or '-'}; "
+            f"cached plan {preview['total']} offers / {len(preview['products'])} products")
+    else:
+        plan = daily_plan.load_plan()
+        day = daily_plan.plan_for_date(plan, today)
     quota = check_quota()
     q_left = None
     if quota:
@@ -97,7 +114,15 @@ def targets_for_today(today):
     remaining["plan_total"] = day["total"]
     remaining["created_before"] = created_total
     remaining["quota_left"] = q_left
+    remaining["rules"] = rules
+    remaining["cached"] = cached
     return remaining, want, open_brands
+
+
+def price_ok(cost_try, remaining):
+    import product_rules as pr
+    rules = remaining.get("rules")
+    return rules is None or not pr.price_block(cost_try, rules)
 
 
 def labels_for(brand, want, open_brands):
@@ -148,6 +173,26 @@ def ms_candidates(labels, want, remaining, report):
     for label in labels:
         goal = needed("M&S", label, want, remaining) * MS_OVERSHOOT
         got, fetched, picked = 0, 0, []
+        # 1) the crawled products the app's plan shows (products.csv, not on Ozon), page re-read now
+        for c in (remaining.get("cached") or {}).get(("M&S", label), []):
+            if got >= goal or fetched >= MAX_MS_PAGES_PER_LABEL:
+                break
+            fetched += 1
+            try:
+                rows = crawler.extract_product(c["url"]) or []
+            except Exception as e:
+                log(f"    ! could not re-read {c['url']}: {e}")
+                continue
+            seen.add(c["url"])
+            if not rows or cp.product_already_live(rows[0].get("ms_article_code"), rows[0].get("parent_sku"), live):
+                continue
+            n = sum(1 for r in rows if (r.get("stock_count") or 0) > 0)
+            if n and price_ok(rows[0].get("price"), remaining):
+                picked.append({"url": c["url"], "name": rows[0].get("name") or c["name"], "rows": rows})
+                got += n
+        if picked:
+            log(f"  M&S {label}: {len(picked)} crawled product(s) still in stock (~{got} offer(s))")
+        # 2) new products from the site sections
         for sec in ms_sections(label):
             if got >= goal or fetched >= MAX_MS_PAGES_PER_LABEL:
                 break
@@ -157,7 +202,8 @@ def ms_candidates(labels, want, remaining, report):
                 if daily_plan.category_label_for_name(item["name"]) == label and item["offers"] > 0:
                     fetched += 1  # only real product-page fetches count; the name check is free
                     rows = crawler.extract_product(item["url"]) or []
-                    if any((r.get("stock_count") or 0) > 0 for r in rows):
+                    if any((r.get("stock_count") or 0) > 0 for r in rows) and rows and \
+                            price_ok(rows[0].get("price"), remaining):
                         picked.append({"url": item["url"], "name": item["name"], "rows": rows})
                         got += item["offers"]
                 if got >= goal or fetched >= MAX_MS_PAGES_PER_LABEL:
@@ -216,6 +262,8 @@ def hm_candidates(labels, want, remaining, report, hm):
                     continue
                 seen.add(rec["article"])
                 why = hc.skip_reason(rec, live)
+                if not why and not price_ok(rec.get("price_try"), remaining):
+                    why = "outside the price limits"
                 label = daily_plan.category_label_for_type(rec["type_id"]) if not why else None
                 if why or label not in goal:
                     skips[why or "category not planned"] += 1

@@ -367,7 +367,17 @@ def test_register_tab_appends_replaces_in_place_and_decorates(monkeypatch):
 
 def test_register_tab_changes_are_restored():
     assert ui.tab_names() == list(ui.TAB_NAMES)
-    assert ui.TAB_BUILDERS["New Product Adding"] is ui.PrioritizationTab
+    assert ui.TAB_BUILDERS["New Product Adding"] is ui.NewProductRulesTab  # rules tab since 2026-11-26
+
+
+def test_parse_rules_inputs_and_category_rows():
+    vals, errs = ui.parse_rules_inputs("100", "", "2500")
+    assert errs == [] and vals == {"daily_offers": 100, "min_sale_usd": 0, "max_cost_try": 2500}
+    assert ui.parse_rules_inputs("1.5", "x", "-3")[1] and len(ui.parse_rules_inputs("1.5", "x", "-3")[1]) == 3
+    assert ui.parse_rules_inputs("", "39,5", "")[0]["min_sale_usd"] == 39.5
+    rows = ui.rules_category_rows({"categories": [{"brand": "H&M", "label": "Dress", "available": 9, "planned": 4}]})
+    assert len(rows) == 2 * len(set(ui.daily_plan.CATEGORY_LABELS.values()))
+    assert rows[0]["brand"] == "M&S" and any(r["label"] == "Dress" and r["planned"] == 4 for r in rows)
 
 
 def test_read_only_endpoints_and_commands_unchanged():

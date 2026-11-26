@@ -96,6 +96,7 @@ if str(HERE) not in sys.path:
 import daily_plan  # noqa: E402  (pure logic + local JSON; never calls Ozon)
 import new_product_plan  # noqa: E402  (pure logic + local JSON; never calls Ozon)
 import new_sources  # noqa: E402  (offline: local JSON + TASKS.md; never fetches the URL)
+import product_rules  # noqa: E402  (pure logic + local JSON; never calls Ozon)
 import task_status  # noqa: E402  (read-only: local JSON + a scheduler query, never changes a task)
 
 INVENTORY_FILE = "category_inventory.json"
@@ -836,9 +837,14 @@ def next_new_products_day(last_status, utc_now=None):
 def collect_new_products_panel(utc_now=None, repo=HERE):
     """Worker thread: what the new-products card shows. Local files + one read-only quota call."""
     last = load_json(Path(repo) / NEW_PRODUCTS_STATUS_FILE, {}) or {}
-    plan = daily_plan.load_plan(str(Path(repo) / PLAN_FILE))
     day_key = next_new_products_day(last, utc_now)
-    day = daily_plan.plan_for_date(plan, day_key)
+    rules_path = str(Path(repo) / product_rules.RULES_FILE)
+    if product_rules.rules_exist(rules_path):
+        day, _plan = product_rules.plan_day_from_rules(
+            product_rules.load_rules(rules_path),
+            product_rules.load_candidates(str(repo), str(Path(repo) / "products.csv")))
+    else:
+        day = daily_plan.plan_for_date(daily_plan.load_plan(str(Path(repo) / PLAN_FILE)), day_key)
     return {"last": last, "next_day": day_key, "next_plan": day,
             "reserve": daily_plan.reserve_for(day.get("total")), "quota": read_quota()}
 
@@ -2803,7 +2809,322 @@ NewProductAddingTab = PrioritizationTab  # the tab's current name
 
 register_tab(TAB_OVERVIEW, OverviewTab)
 register_tab(TAB_DAILY, DailyTasksTab)
-register_tab(TAB_PRIORITIZATION, PrioritizationTab)
+def rules_category_rows(plan, labels=None):
+    """Category rows for the rules tab: every brand x category (also ones with nothing cached,
+    so a priority can be set ahead), M&S first, then by name -- a stable order, rows don't jump
+    when a priority changes. Pure."""
+    by = {(c["brand"], c["label"]): c for c in (plan or {}).get("categories") or []}
+    labels = labels or sorted(set(daily_plan.CATEGORY_LABELS.values()))
+    rows = []
+    for brand in (MS, HM):
+        for lbl in labels:
+            c = by.get((brand, lbl)) or {"brand": brand, "label": lbl, "available": 0, "planned": 0,
+                                         "planned_products": 0, "products_available": 0}
+            rows.append(c)
+    return rows
+
+
+def parse_rules_inputs(daily, min_sale, max_cost):
+    """Entry texts -> (partial rules dict, errors). Empty = 0 (= no limit for the prices)."""
+    out, errs = {}, []
+    for key, text, kind, label in (("daily_offers", daily, int, "Offers per day"),
+                                   ("min_sale_usd", min_sale, float, "Min sale price"),
+                                   ("max_cost_try", max_cost, float, "Max cost price")):
+        t = (text or "").strip().replace(",", ".")
+        if not t:
+            out[key] = 0
+            continue
+        try:
+            v = kind(t)
+        except ValueError:
+            errs.append(f"{label}: not a {'whole ' if kind is int else ''}number")
+            continue
+        if v < 0:
+            errs.append(f"{label}: must be 0 or more")
+            continue
+        out[key] = int(v) if kind is float and v == int(v) else v
+    return out, errs
+
+
+PRODUCT_COLUMNS = (("level", "Priority", 70), ("brand", "Brand", 55), ("category", "Category", 100),
+                   ("name", "Product", 260), ("cost", "Cost ₺", 75), ("sale", "Sale $", 70),
+                   ("offers", "Offers", 55))
+
+
+class NewProductRulesTab(_WidgetHelpers):
+    """New Product Adding (owner design 2026-11-26): offers per day, min sale price, max cost
+    price, a priority per category -> the products the 03:00 job would add with these rules
+    right now. Every change re-plans at once and is saved (new_product_rules.json) -- the job
+    reads the last saved rules. Cached data only; never calls Ozon except the quota read."""
+
+    def __init__(self, app, parent):
+        self.app = app
+        self.tk, self.ttk = app.tk, app.ttk
+        self.dpi = app.dpi
+        tk, ttk = self.tk, self.ttk
+        self.rules_path = str(HERE / product_rules.RULES_FILE)
+        self.rules = product_rules.load_rules(self.rules_path)
+        self.saved_exists = product_rules.rules_exist(self.rules_path)
+        self.candidates = None
+        self.plan = None
+        self.quota = None
+        self.level_vars = {}
+        self._save_after = None
+        self._loading = False
+
+        outer = tk.Frame(parent, bg=BG)
+        outer.pack(fill="both", expand=True)
+        head = tk.Frame(outer, bg=BG)
+        head.pack(fill="x")
+        self.label(head, TAB_NEW_PRODUCT_ADDING, 14, bold=True).pack(side="left")
+        self.data_label = self.label(head, "loading product data…", 9, MUTED)
+        self.data_label.pack(side="right")
+
+        # settings
+        s = tk.Frame(outer, bg=CARD, padx=12, pady=10)
+        s.pack(fill="x", pady=(10, 0))
+        self.daily_var = tk.StringVar(value=str(self.rules["daily_offers"] or ""))
+        self.min_var = tk.StringVar(value=self._fmt(self.rules["min_sale_usd"]))
+        self.max_var = tk.StringVar(value=self._fmt(self.rules["max_cost_try"]))
+        for col, (text, var, hint) in enumerate((("Offers to add per day", self.daily_var, ""),
+                                                 ("Min sale price ($)", self.min_var, "empty = no limit"),
+                                                 ("Max cost price (₺)", self.max_var, "empty = no limit"))):
+            box = tk.Frame(s, bg=CARD)
+            box.grid(row=0, column=col, sticky="w", padx=(0, 28))
+            self.label(box, text, 9, MUTED).pack(anchor="w")
+            e = tk.Entry(box, textvariable=var, width=10, bg="#3f3f3b", fg=FG, insertbackground=FG,
+                         relief="solid", bd=1, font=(FONT, 13), justify="right")
+            e.pack(anchor="w", pady=(2, 0))
+            if hint:
+                self.label(box, hint, 8, DIM).pack(anchor="w")
+            var.trace_add("write", lambda *a: self._changed())
+        s.columnconfigure(3, weight=1)
+        self.summary = self.label(s, "", 11, FG, True, wraplength=self.px(520))
+        self.summary.grid(row=0, column=3, sticky="e")
+        self.msg = self.label(outer, "", 9, MUTED, wraplength=self.px(1100))
+        self.msg.pack(fill="x", pady=(6, 0))
+
+        body = tk.Frame(outer, bg=BG)
+        body.pack(fill="both", expand=True, pady=(8, 0))
+        body.columnconfigure(0, weight=2, uniform="b")
+        body.columnconfigure(1, weight=3, uniform="b")
+        body.rowconfigure(1, weight=1)
+        self.label(body, "Categories -- priority decides each one's share of the day", 10, FG, True).grid(
+            row=0, column=0, sticky="w")
+        self.products_title = self.label(body, "Planned products", 10, FG, True)
+        self.products_title.grid(row=0, column=1, sticky="w", padx=(12, 0))
+
+        # categories (scrollable grid: brand, category, available, priority dropdown, planned)
+        left = tk.Frame(body, bg=CARD)
+        left.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
+        self.cat_canvas = tk.Canvas(left, bg=CARD, highlightthickness=0, bd=0)
+        sb = ttk.Scrollbar(left, orient="vertical", command=self.cat_canvas.yview)
+        self.cat_canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.cat_canvas.pack(side="left", fill="both", expand=True)
+        self.cat_grid = tk.Frame(self.cat_canvas, bg=CARD, padx=8, pady=6)
+        self._cat_win = self.cat_canvas.create_window((0, 0), window=self.cat_grid, anchor="nw")
+        self.cat_grid.bind("<Configure>", lambda e: self.cat_canvas.configure(scrollregion=self.cat_canvas.bbox("all")))
+        self.cat_canvas.bind("<Enter>", lambda e: self.cat_canvas.bind_all("<MouseWheel>", self._on_wheel))
+        self.cat_canvas.bind("<Leave>", lambda e: self.cat_canvas.unbind_all("<MouseWheel>"))
+        self.cat_cells = {}
+
+        # planned products
+        right = tk.Frame(body, bg=BG)
+        right.grid(row=1, column=1, sticky="nsew", padx=(12, 0), pady=(4, 0))
+        self.tree = ttk.Treeview(right, columns=[c[0] for c in PRODUCT_COLUMNS], show="headings",
+                                 selectmode="browse")
+        for key, heading, width in PRODUCT_COLUMNS:
+            self.tree.heading(key, text=heading)
+            self.tree.column(key, width=self.px(width), anchor="e" if key in ("cost", "sale", "offers") else "w",
+                             stretch=key == "name")
+        for lvl, color in (("urgent", STATUS["critical"]), ("top", STATUS["serious"]), ("high", STATUS["warning"])):
+            self.tree.tag_configure(lvl, foreground=color)
+        psb = ttk.Scrollbar(right, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=psb.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        psb.pack(side="right", fill="y")
+        self.tree.bind("<Double-1>", self._open_product)
+        self.label(outer, "Double-click a product to open its page. The 03:00 job uses the last saved settings; "
+                          "on the websites it may find a product sold out or a new one -- it keeps the day's number "
+                          "with spare products.", 8, MUTED, wraplength=self.px(1100)).pack(anchor="w", pady=(6, 0))
+
+        self._build_category_rows()
+        self._render_summary()
+        self.app.root.after(50, self._load_data)
+        self.app.root.after(15 * 60_000, self._periodic_reload)
+
+    # ---------- helpers ----------
+    @staticmethod
+    def _fmt(v):
+        return "" if not v else (str(int(v)) if float(v) == int(v) else str(v))
+
+    def _on_wheel(self, event):
+        try:
+            self.cat_canvas.yview_scroll(int(-event.delta / 120) or (-1 if event.delta > 0 else 1), "units")
+        except Exception:
+            pass
+
+    def _next_day(self):
+        return next_new_products_day(load_json(HERE / NEW_PRODUCTS_STATUS_FILE, {}) or {})
+
+    # ---------- data (worker threads) ----------
+    def _load_data(self):
+        def work():
+            try:
+                cands = product_rules.load_candidates(str(HERE), str(HERE / "products.csv"))
+            except Exception as e:
+                cands, err = [], f"{type(e).__name__}: {e}"
+            else:
+                err = None
+            q = read_quota()
+            self.app.post(self._data_loaded, cands, q, err)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _periodic_reload(self):
+        self._load_data()
+        self.app.root.after(15 * 60_000, self._periodic_reload)
+
+    def _data_loaded(self, cands, quota, err):
+        self.candidates, self.quota = cands, quota
+        inv = load_json(HERE / HM_INVENTORY_FILE, {}) or {}
+        hm_when = _text(inv.get("walked_at"))[:16].replace("T", " ") or "?"
+        try:
+            ms_when = datetime.fromtimestamp((HERE / "products.csv").stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        except OSError:
+            ms_when = "?"
+        n_ms = sum(1 for c in cands if c["brand"] == MS)
+        self.data_label.configure(text=(f"product data: {n_ms:,} M&S (crawl {ms_when}) · {len(cands) - n_ms:,} H&M "
+                                        f"(site read {hm_when})") if not err else f"product data failed: {err}")
+        self.replan()
+
+    # ---------- plan ----------
+    def _current_rules(self):
+        vals, errs = parse_rules_inputs(self.daily_var.get(), self.min_var.get(), self.max_var.get())
+        rules = dict(self.rules, **vals)
+        rules["priorities"] = {k: v.get() for k, v in self.level_vars.items()}
+        return rules, errs + (product_rules.validate(rules) if not errs else [])
+
+    def replan(self):
+        rules, errs = self._current_rules()
+        if errs:
+            self.msg.configure(text="Not saved: " + "; ".join(errs), fg=STATUS["critical"])
+            return
+        if self.candidates is not None:
+            self.plan = product_rules.build_plan(rules, self.candidates)
+            self._render_categories()
+            self._render_products()
+        self._render_summary()
+
+    def _changed(self):
+        if self._loading:
+            return
+        self.replan()
+        rules, errs = self._current_rules()
+        if errs:
+            return
+        self.msg.configure(text="Saving…", fg=MUTED)
+        if self._save_after:
+            self.app.root.after_cancel(self._save_after)
+        self._save_after = self.app.root.after(700, self._save)
+
+    def _save(self):
+        self._save_after = None
+        rules, errs = self._current_rules()
+        if errs:
+            return
+        saved, errs = product_rules.save_rules(rules, self.rules_path)
+        if errs:
+            self.msg.configure(text="Not saved: " + "; ".join(errs), fg=STATUS["critical"])
+            return
+        self.rules = product_rules.load_rules(self.rules_path)
+        self.saved_exists = True
+        self.msg.configure(text=f"Saved {datetime.now():%H:%M:%S} -- the {self._next_day()} 03:00 run uses these "
+                                "settings.", fg=STATUS["good"])
+        self._render_summary()
+
+    # ---------- drawing ----------
+    def _build_category_rows(self):
+        tk, ttk = self.tk, self.ttk
+        for w in self.cat_grid.winfo_children():
+            w.destroy()
+        for c, (text, width) in enumerate((("Brand", 6), ("Category", 13), ("Available", 9),
+                                           ("Priority", 10), ("Planned", 8))):
+            tk.Label(self.cat_grid, text=text, bg=CARD, fg=MUTED, font=(FONT, 9, "bold"), width=width,
+                     anchor="w").grid(row=0, column=c, sticky="w", padx=(0, 6), pady=(0, 4))
+        self._loading = True
+        for i, r in enumerate(rules_category_rows(None), start=1):
+            key = product_rules.cat_key(r["brand"], r["label"])
+            lbl_b = tk.Label(self.cat_grid, text=r["brand"], bg=CARD, fg=FG, font=(FONT, 10), anchor="w")
+            lbl_c = tk.Label(self.cat_grid, text=r["label"], bg=CARD, fg=FG, font=(FONT, 10), anchor="w")
+            lbl_a = tk.Label(self.cat_grid, text="…", bg=CARD, fg=MUTED, font=(FONT, 10), anchor="e", width=7)
+            var = tk.StringVar(value=product_rules.priority_of(self.rules, r["brand"], r["label"]))
+            box = ttk.Combobox(self.cat_grid, textvariable=var, values=list(product_rules.LEVELS),
+                               state="readonly", width=8)
+            lbl_p = tk.Label(self.cat_grid, text="", bg=CARD, fg=FG, font=(FONT, 10, "bold"), anchor="e", width=6)
+            for c, w in enumerate((lbl_b, lbl_c, lbl_a, box, lbl_p)):
+                w.grid(row=i, column=c, sticky="w", padx=(0, 6), pady=1)
+            var.trace_add("write", lambda *a: self._changed())
+            self.level_vars[key] = var
+            self.cat_cells[key] = (lbl_b, lbl_c, lbl_a, lbl_p)
+        self._loading = False
+
+    def _render_categories(self):
+        rows = {product_rules.cat_key(r["brand"], r["label"]): r for r in rules_category_rows(self.plan)}
+        for key, (lb, lc, la, lp) in self.cat_cells.items():
+            r = rows.get(key) or {}
+            never = self.level_vars[key].get() == "never"
+            color = DIM if never or not r.get("available") else FG
+            lb.configure(fg=color)
+            lc.configure(fg=color)
+            la.configure(text=f"{r.get('available', 0):,}" if r.get("available") else "--")
+            lp.configure(text=str(r.get("planned") or "") if r.get("planned") else "",
+                         fg=STATUS["good"] if r.get("planned") else FG)
+
+    def _render_products(self):
+        self.tree.delete(*self.tree.get_children())
+        self._product_urls = {}
+        for i, p in enumerate((self.plan or {}).get("products") or []):
+            cost = p.get("cost_try")
+            iid = self.tree.insert("", "end", values=(
+                p.get("level"), p["brand"], p["label"], p.get("name"),
+                f"{cost:,.0f}" if isinstance(cost, (int, float)) else "?",
+                f"{product_rules.sale_usd(cost):,.2f}" if isinstance(cost, (int, float)) else "?",
+                p.get("offers")), tags=(p.get("level"),))
+            self._product_urls[iid] = p.get("url")
+        n = len((self.plan or {}).get("products") or [])
+        self.products_title.configure(text=f"Planned products ({n})")
+
+    def _render_summary(self):
+        rules, errs = self._current_rules()
+        day = self._next_day()
+        if errs:
+            return
+        if not rules.get("daily_offers"):
+            text, color = f"Next run {day} 03:00: nothing planned (offers per day is 0)", STATUS["warning"]
+        elif self.plan is None:
+            text, color = f"Next run {day} 03:00: planning…", MUTED
+        else:
+            t = self.plan["total"]
+            text = f"Next run {day} 03:00: {t:,} offers from {len(self.plan['products'])} products"
+            color = FG if t >= rules["daily_offers"] else STATUS["warning"]
+            if t < rules["daily_offers"]:
+                text += f" (only {t} of {rules['daily_offers']} fit the settings)"
+        if self.quota:
+            text += f"\nOzon quota now {self.quota['limit'] - self.quota['usage']:,} / {self.quota['limit']:,}"
+        if not self.saved_exists:
+            text += "\nNot saved yet -- change any value to save"
+        self.summary.configure(text=text, fg=color)
+
+    def _open_product(self, event):
+        iid = self.tree.identify_row(event.y)
+        url = getattr(self, "_product_urls", {}).get(iid)
+        if url:
+            import webbrowser
+            webbrowser.open(url)
+
+
+register_tab(TAB_PRIORITIZATION, NewProductRulesTab)
 
 
 class OzonSalesApp(_WidgetHelpers):
