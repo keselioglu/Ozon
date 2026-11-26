@@ -49,9 +49,10 @@ def test_spares_complete_a_short_category(fake_build):
     report = {}
     chosen, spares = rnp.pick_and_build({}, hm_found, want, set(), _remaining(20), False, report)
     total = sum(len(e[2]) for e in chosen)
-    assert total == 18  # 10 Dress + 4 Top + 2 spare Dress products (reserve 3 -> 4 offers built, all used)
-    assert report["reserve"]["used_for_shortfall"] == 4
-    assert total <= 20
+    # 10 Dress + 4 Top + 2 reserve Dress products (4) + 1 more found Dress product (2) = the day's 20
+    assert total == 20
+    assert report["reserve"]["used_for_shortfall"] == 6
+    assert sum(len(e[2]) for e in spares) <= 4   # reserve kept for failed imports, never above the target
 
 
 def test_take_spares_whole_products_only():

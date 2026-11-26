@@ -90,3 +90,13 @@ def test_live_ms_tokens_and_csv_candidates(tmp_path):
     assert tokens == {"T2", "999"}
     out = pr.ms_candidates_from_csv(str(p), tokens, lambda n: "Underwear")
     assert [(c["key"], c["offers"]) for c in out] == [("a", 2)]   # b live, c sold out
+
+
+def test_urgent_takes_every_product_of_its_category_first():
+    a = pr.allocate(100, {"U": 40, "T": 500, "M": 500}, {"U": "urgent", "T": "top"})
+    assert a["U"] == 40 and a["T"] + a["M"] == 60 and a["T"] == 48   # rest 8:2
+    a = pr.allocate(30, {"U": 40, "V": 20, "M": 500}, {"U": "urgent", "V": "urgent"})
+    assert a == {"U": 20, "V": 10, "M": 0}                            # urgents share the day by size
+    cands = [cand("M&S", "Underwear", 2, 500, f"u{i}") for i in range(5)] + [cand("H&M", "Dress", 2, 500, "d")]
+    p = pr.build_plan(rules(daily_offers=100, priorities={"M&S/Underwear": "urgent"}), cands)
+    assert sum(1 for x in p["products"] if x["label"] == "Underwear") == 5

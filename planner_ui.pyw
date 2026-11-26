@@ -2932,6 +2932,7 @@ class NewProductRulesTab(_WidgetHelpers):
         self.cat_canvas.bind("<Enter>", lambda e: self.cat_canvas.bind_all("<MouseWheel>", self._on_wheel))
         self.cat_canvas.bind("<Leave>", lambda e: self.cat_canvas.unbind_all("<MouseWheel>"))
         self.cat_cells = {}
+        self.cat_widgets = {}
 
         # planned products
         right = tk.Frame(body, bg=BG)
@@ -3065,13 +3066,29 @@ class NewProductRulesTab(_WidgetHelpers):
             var = tk.StringVar(value=product_rules.priority_of(self.rules, r["brand"], r["label"]))
             box = ttk.Combobox(self.cat_grid, textvariable=var, values=list(product_rules.LEVELS),
                                state="readonly", width=8)
+            # the wheel scrolls the list -- it must never change a priority by accident
+            box.bind("<MouseWheel>", lambda e: (self._on_wheel(e), "break")[1])
             lbl_p = tk.Label(self.cat_grid, text="", bg=CARD, fg=FG, font=(FONT, 10, "bold"), anchor="e", width=6)
-            for c, w in enumerate((lbl_b, lbl_c, lbl_a, box, lbl_p)):
-                w.grid(row=i, column=c, sticky="w", padx=(0, 6), pady=1)
-            var.trace_add("write", lambda *a: self._changed())
+            var.trace_add("write", lambda *a: self._level_changed())
             self.level_vars[key] = var
             self.cat_cells[key] = (lbl_b, lbl_c, lbl_a, lbl_p)
+            self.cat_widgets[key] = (lbl_b, lbl_c, lbl_a, box, lbl_p)
+        self._regrid_categories()
         self._loading = False
+
+    def _regrid_categories(self):
+        """Rows sorted by priority (urgent first, never last), then brand, then category."""
+        order = sorted(self.cat_widgets, key=lambda k: (-product_rules.WEIGHTS[self.level_vars[k].get()],
+                                                        0 if k.startswith(MS) else 1, k))
+        for i, key in enumerate(order, start=1):
+            for c, w in enumerate(self.cat_widgets[key]):
+                w.grid(row=i, column=c, sticky="w", padx=(0, 6), pady=1)
+
+    def _level_changed(self):
+        if self._loading:
+            return
+        self._regrid_categories()
+        self._changed()
 
     def _render_categories(self):
         rows = {product_rules.cat_key(r["brand"], r["label"]): r for r in rules_category_rows(self.plan)}

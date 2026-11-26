@@ -344,47 +344,57 @@ def pick_and_build(ms_found, hm_found, want, open_brands, remaining, dry_run, re
     dup_checks = (u.fetch_live_article_codes_by_prefix(), u.fetch_live_offer_ids_by_article()) if ms_found else ({}, {})
     queues = [("M&S", lbl, ms_found.get(lbl, [])) for lbl in ms_found] + \
              [("H&M", lbl, hm_found.get(lbl, [])) for lbl in hm_found]
-    # allocated categories first, then (fill_remainder) the open ones
-    queues.sort(key=lambda q: 0 if (q[0], q[1]) in per_left else 1)
+    # allocated categories first, then by the owner's priority (urgent ... low), then (fill_remainder) open ones
+    rules = remaining.get("rules")
+    if rules:
+        import product_rules as pr
+        weight = lambda b, l: pr.WEIGHTS[pr.priority_of(rules, b, l)]  # noqa: E731
+    else:
+        weight = lambda b, l: 0  # noqa: E731
+    queues.sort(key=lambda q: (0 if (q[0], q[1]) in per_left else 1, -weight(q[0], q[1])))
     chosen, spares, skipped = [], [], Counter()
+    later, overflow = [], []   # not built yet / built but too big for its category's share
+
+    def build(brand, label, p):
+        """-> (entry, None) or (None, reason)."""
+        if brand == "M&S":
+            art = p["rows"][0].get("ms_article_code")
+            specs = p["rows"][0].get("specs_json")
+            tr, err = translate("M&S", art, p["name"], specs, dry_run, client_box) if art else (None, "no article")
+            if not tr:
+                return None, f"translation: {err}"[:80]
+            items, why = ms_items_for(p, {art: tr}, dry_run, dup_checks)
+        else:
+            rec, det = p["rec"], p["detail"]
+            tr, err = translate("H&M", rec["article"], rec["title"], hc.specs_for_translation(det), dry_run, client_box)
+            if not tr:
+                return None, f"translation: {err}"[:80]
+            items = hc.build_items(rec, det, tr, u.TRY_TO_USD_RATE, u.package_dimensions(rec["title"]))
+            why = None if items else "no image/colour/size"
+        if why:
+            return None, why
+        if find_existing_offer_ids(it["offer_id"] for it in items):
+            return None, "offer_id already exists on Ozon"
+        ids = [it["offer_id"] for it in items]
+        if len(set(ids)) != len(ids):
+            return None, "two sizes map to the same offer_id (ambiguous)"
+        return (brand, label, items, p.get("url") or p.get("rec", {}).get("article")), None
+
     for brand, label, products in queues:
         key = (brand, label)
-        for p in products:
+        for i, p in enumerate(products):
             cap = per_left.get(key)
             if cap is None and brand not in open_brands:
                 break
             main_open = total_left > 0 and (cap is None or cap > 0)
             if not main_open and reserve_left <= 0:
+                later.extend((brand, label, q) for q in products[i:])
                 break
-            if brand == "M&S":
-                art = p["rows"][0].get("ms_article_code")
-                specs = p["rows"][0].get("specs_json")
-                tr, err = translate("M&S", art, p["name"], specs, dry_run, client_box) if art else (None, "no article")
-                if not tr:
-                    skipped[f"translation: {err}"[:80]] += 1
-                    continue
-                items, why = ms_items_for(p, {art: tr}, dry_run, dup_checks)
-            else:
-                rec, det = p["rec"], p["detail"]
-                tr, err = translate("H&M", rec["article"], rec["title"], hc.specs_for_translation(det), dry_run, client_box)
-                if not tr:
-                    skipped[f"translation: {err}"[:80]] += 1
-                    continue
-                items = hc.build_items(rec, det, tr, u.TRY_TO_USD_RATE, u.package_dimensions(rec["title"]))
-                why = None if items else "no image/colour/size"
+            entry, why = build(brand, label, p)
             if why:
                 skipped[why] += 1
                 continue
-            existing = find_existing_offer_ids(it["offer_id"] for it in items)
-            ids = [it["offer_id"] for it in items]
-            if existing:
-                skipped["offer_id already exists on Ozon"] += 1
-                continue
-            if len(set(ids)) != len(ids):
-                skipped["two sizes map to the same offer_id (ambiguous)"] += 1
-                continue
-            n = len(items)
-            entry = (brand, label, items, p.get("url") or p.get("rec", {}).get("article"))
+            n = len(entry[2])
             if main_open and n <= total_left and (cap is None or n <= cap):
                 chosen.append(entry)
                 total_left -= n
@@ -394,18 +404,40 @@ def pick_and_build(ms_found, hm_found, want, open_brands, remaining, dry_run, re
                 spares.append(entry)
                 reserve_left -= n
             else:
-                skipped["does not fit in what is left of the plan"] += 1
+                overflow.append(entry)
     # Reserve, step 1: categories came up short -> complete the day's total from the spares.
     used = 0
-    for entry in list(spares):
+    for entry in list(spares) + overflow:
         if total_left <= 0:
             break
         n = len(entry[2])
         if n <= total_left:
             chosen.append(entry)
-            spares.remove(entry)
+            if entry in spares:
+                spares.remove(entry)
+            else:
+                overflow.remove(entry)
             total_left -= n
             used += n
+    # Still short (whole products / sold out / duplicates): keep building the products found in the
+    # planned categories, best priority first, until the day's number is reached (+ the reserve).
+    for brand, label, p in later:
+        if total_left <= 0 and reserve_left <= 0:
+            break
+        entry, why = build(brand, label, p)
+        if why:
+            skipped[why] += 1
+            continue
+        n = len(entry[2])
+        if 0 < total_left and n <= total_left:
+            chosen.append(entry)
+            total_left -= n
+            used += n
+        elif reserve_left > 0:
+            spares.append(entry)
+            reserve_left -= n
+    if overflow:
+        skipped["does not fit in what is left of the plan"] += len(overflow)
     report["skipped_at_build"] = dict(skipped)
     report["reserve"] = {"planned": daily_plan.reserve_for(remaining.get("plan_total") or remaining["total"]),
                          "built": used + sum(len(e[2]) for e in spares),

@@ -10,8 +10,9 @@ the products these rules would add right now (cached data), and the plan changes
 change. On the websites the job may see something different (sold out, new prices) -- the
 reserve covers that.
 
-How the daily number is split: each category's share is proportional to its priority weight
-(never 0, low 1, medium 2, high 4, top 8, urgent 16), never more than it has available (after
+How the daily number is split: urgent categories take ALL their products first (up to the daily
+number); the rest is shared in proportion to the priority weight
+(never 0, low 1, medium 2, high 4, top 8), never more than a category has available (after
 the price limits); what a category can't use goes to the others by weight. Inside a category
 products are taken whole (all their in-stock sizes), in site order.
 """
@@ -143,9 +144,25 @@ def price_block(cost_try, rules):
 def allocate(total, available, levels):
     """{cat: offers} -- total split by priority weight, capped by available[cat], leftovers to
     the others by weight (largest remainder). Categories with weight 0 / nothing available get 0."""
-    cats = [c for c in available if WEIGHTS.get(levels.get(c, DEFAULT_LEVEL), 0) > 0 and available[c] > 0]
     out = {c: 0 for c in available}
     left = max(0, int(total or 0))
+    # urgent = every product of the category (owner 2026-11-26), before anything else; several
+    # urgent categories that don't all fit share the day by their size
+    urgent = [c for c in available if levels.get(c) == "urgent" and available[c] > 0]
+    if urgent and left:
+        need = sum(available[c] for c in urgent)
+        if need <= left:
+            for c in urgent:
+                out[c] = available[c]
+        else:
+            exact = {c: left * available[c] / need for c in urgent}
+            for c in urgent:
+                out[c] = int(exact[c])
+            for c in sorted(urgent, key=lambda c: (-(exact[c] - out[c]), c))[:left - sum(out[c] for c in urgent)]:
+                out[c] += 1
+        left -= sum(out[c] for c in urgent)
+    cats = [c for c in available if WEIGHTS.get(levels.get(c, DEFAULT_LEVEL), 0) > 0 and available[c] > 0
+            and levels.get(c) != "urgent"]
     open_cats = list(cats)
     while left > 0 and open_cats:
         wsum = sum(WEIGHTS[levels.get(c, DEFAULT_LEVEL)] for c in open_cats)
@@ -170,11 +187,22 @@ def allocate(total, available, levels):
 # --- candidates (cached data) and the plan --------------------------------------------------
 
 def live_ms_tokens(live_offer_ids):
-    """Tokens between 'MS-' and the next '-' of live M&S offers: article codes or parent SKUs."""
+    """Article codes / parent SKUs of every live M&S offer, under any prefix (MS-, MARKS-, MAR-,
+    SML-...): the token after 'MS-' plus whatever extract_article_code_from_offer_id finds."""
+    try:
+        from ozon_mapping import extract_article_code_from_offer_id as extract
+    except Exception:
+        extract = None
     out = set()
     for oid in live_offer_ids or []:
-        if isinstance(oid, str) and oid.startswith("MS-"):
+        if not isinstance(oid, str):
+            continue
+        if oid.startswith("MS-"):
             out.add(oid[3:].split("-", 1)[0])
+        if extract and not oid.startswith("HM"):
+            code = extract(oid)
+            if code:
+                out.add(code)
     return out
 
 
