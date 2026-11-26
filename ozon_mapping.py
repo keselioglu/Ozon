@@ -518,31 +518,40 @@ def resolve_category_and_type(name, is_set_hint):
     caller should skip rather than guess, since an unmapped category means
     unknown required fields."""
     lower = (name or "").lower()
-    if any(kw in lower for kw in UNDERWEAR_KEYWORDS):
-        return CATEGORY_ID, (TYPE_ID_PANTIES_SET if is_set_hint else TYPE_ID_PANTIES)
-    if any(kw in lower for kw in TANK_TOP_KEYWORDS):
-        return CATEGORY_ID_CLOTHING, TYPE_ID_TANK_TOP
+    # Tights ("Külotlu Çorap") are neither panties nor socks -- skipped (added 2026-11-26).
+    if "külotlu" in lower or "kulotlu" in lower:
+        return None, None
+    # Pajama pieces ("Pijama Üstü", "Pijama Altı") are pajamas whatever word follows.
     if any(kw in lower for kw in PAJAMA_KEYWORDS):
         return CATEGORY_ID_CLOTHING, TYPE_ID_PAJAMA
-    if any(kw in lower for kw in TSHIRT_KEYWORDS):
-        return CATEGORY_ID_CLOTHING, TYPE_ID_TSHIRT
-    if any(kw in lower for kw in SOCKS_KEYWORDS):
-        return CATEGORY_ID, TYPE_ID_SOCKS
-    if any(kw in lower for kw in SWEATER_KEYWORDS):
-        return CATEGORY_ID_CLOTHING, TYPE_ID_SWEATER
-    if any(kw in lower for kw in TROUSERS_KEYWORDS):
-        return CATEGORY_ID_CLOTHING, TYPE_ID_TROUSERS
-    if any(kw in lower for kw in BLOUSE_KEYWORDS):
-        return CATEGORY_ID_CLOTHING, TYPE_ID_BLOUSE
-    if any(kw in lower for kw in SKIRT_KEYWORDS):
-        return CATEGORY_ID_CLOTHING, TYPE_ID_SKIRT
-    if any(kw in lower for kw in JACKET_KEYWORDS):
-        return CATEGORY_ID_CLOTHING, TYPE_ID_JACKET
-    if is_dress_word(name):
-        return CATEGORY_ID_CLOTHING, TYPE_ID_DRESS
-    if is_top_word(name):
-        return CATEGORY_ID_CLOTHING, TYPE_ID_TOP
-    return None, None
+    # Added 2026-11-26: Turkish puts the garment noun LAST ("Saten Slip Etek" = skirt, "Kloş
+    # Etekli Midi Elbise" = dress, "Etek Ucu Balon Kesimli Ceket" = jacket), so the keyword
+    # that occurs last in the name wins. The old fixed-order cascade sent those to
+    # Underwear/Skirt/Skirt. Ties (same position) keep the old order below.
+    lower = re.sub(r"sweatshirt", "sweat-shirt_", lower)  # "sweatshirt" is not a t-shirt
+    lower = re.sub(r"tak[iı]m\s+elbise", "takim-suit", lower)  # men's suit is not a dress
+    lower = lower.replace("bluzon", "bomber-ceket")  # "Bluzon" = bomber jacket, not a blouse
+    candidates = [
+        (UNDERWEAR_KEYWORDS, (CATEGORY_ID, TYPE_ID_PANTIES_SET if is_set_hint else TYPE_ID_PANTIES)),
+        (TANK_TOP_KEYWORDS, (CATEGORY_ID_CLOTHING, TYPE_ID_TANK_TOP)),
+        (TSHIRT_KEYWORDS, (CATEGORY_ID_CLOTHING, TYPE_ID_TSHIRT)),
+        (SOCKS_KEYWORDS, (CATEGORY_ID, TYPE_ID_SOCKS)),
+        (SWEATER_KEYWORDS, (CATEGORY_ID_CLOTHING, TYPE_ID_SWEATER)),
+        (TROUSERS_KEYWORDS, (CATEGORY_ID_CLOTHING, TYPE_ID_TROUSERS)),
+        (BLOUSE_KEYWORDS, (CATEGORY_ID_CLOTHING, TYPE_ID_BLOUSE)),
+        (SKIRT_KEYWORDS, (CATEGORY_ID_CLOTHING, TYPE_ID_SKIRT)),
+        (JACKET_KEYWORDS, (CATEGORY_ID_CLOTHING, TYPE_ID_JACKET)),
+        (DRESS_KEYWORDS, (CATEGORY_ID_CLOTHING, TYPE_ID_DRESS)),
+    ]
+    best, best_pos = (None, None), -1
+    for keywords, result in candidates:
+        pos = max((lower.rfind(kw) for kw in keywords), default=-1)
+        if pos > best_pos:
+            best, best_pos = result, pos
+    top = list(re.finditer(r"(?<![a-zçğıöşü])(üst|ust)(ü|u)?(?![a-zçğıöşü])", lower))
+    if top and top[-1].start() > best_pos:
+        best = (CATEGORY_ID_CLOTHING, TYPE_ID_TOP)
+    return best
 
 
 def is_socks(name):

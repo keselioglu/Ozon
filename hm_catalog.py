@@ -97,19 +97,12 @@ def ru_size(size_name, is_socks=False):
 
 
 def classify(title):
-    """-> (description_category_id, type_id) via the M&S keyword cascade on the Turkish title.
-    Tights ("külotlu çorap") would hit the underwear keyword "külot" -- skipped explicitly."""
+    """-> (description_category_id, type_id) via the shared M&S keyword cascade on the Turkish
+    title: the garment word that comes LAST wins ("Slip Etek" = skirt, "Tişört Elbise" = dress),
+    tights ("külotlu çorap") are skipped -- see ozon_mapping.resolve_category_and_type()."""
     t = (title or "").lower()
-    if "külotlu" in t or "kulotlu" in t:
-        return None, None
     is_set = bool(re.search(r"\d+\s*'?\s*l[iıuü]\b", t)) or "set" in t.split()
-    cat, type_id = resolve_category_and_type(title, is_set)
-    # "Tişört Elbise" / "Gömlek Elbise" / "Kazak Elbise" are dresses: the M&S cascade checks the
-    # top/t-shirt words first. is_dress_word() keeps "takım elbise" (a suit) out.
-    from ozon_mapping import TYPE_ID_DRESS, is_dress_word
-    if type_id and type_id != TYPE_ID_DRESS and is_dress_word(title):
-        return CATEGORY_ID_CLOTHING, TYPE_ID_DRESS
-    return cat, type_id
+    return resolve_category_and_type(title, is_set)
 
 
 def offer_id(article, token):

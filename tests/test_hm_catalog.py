@@ -41,6 +41,25 @@ def test_classify_and_tights_excluded():
     assert hc.classify("Drapeli Tişört Elbise")[1] == TYPE_ID_DRESS  # a t-shirt DRESS is a dress
 
 
+@pytest.mark.parametrize("title,expected", [
+    ("Saten Slip Etek", "Skirt"), ("MAMA Dantel Şeritli Slip Etek", "Skirt"),
+    ("Kloş Etekli Midi Elbise", "Dress"), ("Sweatshirt Elbise", "Dress"),
+    ("Etek Ucu Balon Kesimli Ceket", "Jacket"), ("Etek Ucu Balon Kesimli Üst", "Top"),
+    ("Bluzon Ceket", "Jacket"), ("Saten Bluz", "Blouse"),
+    ("Pijama Üstü", "Pajama"), ("Atletli Pijama Takımı", "Pajama"),
+    ("3'lü Hipster Külot", "Underwear Set"), ("Brazilian Külot", "Underwear"), ("Slip Elbise", "Dress"),
+    ("Pantolon Çorabı", "Socks"), ("Takım Elbise Ceketi", "Jacket"), ("Triko Tişört", "T-Shirt"),
+])
+def test_last_garment_word_wins(title, expected):
+    from daily_plan import CATEGORY_LABELS
+    assert CATEGORY_LABELS.get(hc.classify(title)[1]) == expected
+
+
+def test_tights_skipped_for_ms_too():
+    from ozon_mapping import resolve_category_and_type
+    assert resolve_category_and_type("3'lü 15 Denye Külotlu Çorap Seti", True) == (None, None)
+
+
 def _hit(**kw):
     h = {"articleCode": "1375249001", "title": "Lastik Örgülü Elbise", "category": "ladies_dresses",
          "productColor": {"colorName": "Siyah"}, "prices": [{"price": 2299}],
