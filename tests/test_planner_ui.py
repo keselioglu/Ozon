@@ -524,3 +524,20 @@ def test_opens_on_first_planned_day_and_planned_offers():
     assert ui.planned_offers(day, "M&S", "Socks") == 0 and ui.planned_offers(None, "M&S", "Socks") == 0
     plan["overrides"] = {"2026-12-30": {"total": 5}}  # outside the 7-day selector -> Default
     assert ui.first_planned_day(plan, TODAY) == "Default"
+
+
+def test_roll_day_moves_today_and_auto_day_forward(monkeypatch):
+    """App left open across midnight UTC must count the new day (2026-11-26 'Created today' 0 bug)."""
+    import types
+    plan = {"default": {"total": 0, "allocations": {}, "fill_remainder": False}, "overrides": {}}
+    tab = types.SimpleNamespace(today="2026-11-25", day_key="2026-11-26", dirty=False, plan=plan,
+                                created_by_cat={("M&S", "Pajama"): 5}, day=None)
+    monkeypatch.setattr(ui.daily_plan, "utc_today", lambda: "2026-11-26")
+    assert ui.PrioritizationTab._roll_day(tab) is True
+    assert tab.today == "2026-11-26"
+    assert tab.created_by_cat is None
+    assert tab.day_key == "2026-11-26"  # still >= today, left as chosen
+    assert ui.PrioritizationTab._roll_day(tab) is False
+    tab.today, tab.day_key = "2026-11-25", "2026-11-25"
+    ui.PrioritizationTab._roll_day(tab)
+    assert tab.day_key >= "2026-11-26"

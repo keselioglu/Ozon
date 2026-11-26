@@ -1716,6 +1716,7 @@ class PrioritizationTab(_WidgetHelpers):
 
         self.load_local()
         self.app.root.after(50, self.start_background_reads)
+        self.app.root.after(60_000, self._watch_day)
 
     # ---------- thread hand-off ----------
     def post(self, fn, *args):
@@ -1871,6 +1872,7 @@ class PrioritizationTab(_WidgetHelpers):
     # ---------- data ----------
     def load_local(self):
         """Re-reads every cached JSON file (cheap, local) and redraws."""
+        self._roll_day()
         self.inventory = load_json(HERE / INVENTORY_FILE, {}) or {}
         self.hm_inventory = load_json(HERE / HM_INVENTORY_FILE, None)
         self.catalog = load_json(HERE / CATALOG_STATUS_FILE, {}) or {}
@@ -1885,6 +1887,31 @@ class PrioritizationTab(_WidgetHelpers):
             self.np_plan = new_product_plan.load_plan(str(HERE / NP_PLAN_FILE))
             self.np_saved = copy.deepcopy(self.np_plan)
         self.render()
+
+    def _roll_day(self):
+        """The app can stay open past midnight UTC (03:00 Moscow, when the new-products job
+        runs): move 'today' forward so 'Created today' counts the new day. True if it moved."""
+        now = daily_plan.utc_today()
+        if now == self.today:
+            return False
+        old = self.today
+        self.today = now
+        self.created_by_cat = None
+        if not self.dirty and self.day_key <= old:
+            self.day_key = first_planned_day(self.plan, now)
+            self.day = get_day(self.plan, self.day_key)
+        if getattr(self, "day_combo", None) is not None:
+            self.day_combo.configure(values=[day_label(k, now) for k in day_keys(now)])
+            self.day_var.set(day_label(self.day_key, now))
+        return True
+
+    def _watch_day(self):
+        try:
+            if self._roll_day():
+                self.load_local()
+                self.start_background_reads()
+        finally:
+            self.app.root.after(60_000, self._watch_day)
 
     def start_background_reads(self):
         def quota_work():
