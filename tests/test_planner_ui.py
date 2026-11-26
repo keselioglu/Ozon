@@ -582,3 +582,36 @@ def test_task_section_uses_new_products_panel():
     secs = ui.build_task_sections(st)
     assert secs[0]["title"] == "New products upload"
     assert secs[0]["metrics"][0][1] == "10 offers"
+
+
+def test_quick_plan_rows_and_day():
+    rows = [{"brand": "H&M", "category": "Dress", "pool": 30}, {"brand": "M&S", "category": "Underwear", "pool": 400},
+            {"brand": "M&S", "category": "Pajama", "pool": 50}, {"brand": "M&S", "category": "Socks", "pool": 0}]
+    day = {"total": 5, "allocations": {"M&S": {"Socks": 5}}}
+    out = ui.quick_plan_rows(rows, day)
+    assert [(r["brand"], r["category"]) for r in out] == [("M&S", "Underwear"), ("M&S", "Pajama"),
+                                                          ("M&S", "Socks"), ("H&M", "Dress")]
+    assert out[2]["planned"] == 5  # nothing available but already planned -> still shown
+    d, errs = ui.quick_plan_day({("M&S", "Underwear"): 40, ("H&M", "Dress"): 20, ("M&S", "Pajama"): 0})
+    assert errs == [] and d == {"total": 60, "allocations": {"M&S": {"Underwear": 40}, "H&M": {"Dress": 20}},
+                                "fill_remainder": False}
+    assert ui.quick_plan_day({("M&S", "Underwear"): None})[1]
+    assert ui.parse_quick_value("") == 0 and ui.parse_quick_value(" 12 ") == 12
+    assert ui.parse_quick_value("1.5") is None and ui.parse_quick_value("-3") is None
+
+
+def test_quick_plan_saved_day_passes_validation():
+    plan = {"version": 1, "default": {"total": 0, "allocations": {}, "fill_remainder": False}, "overrides": {}}
+    d, _ = ui.quick_plan_day({("M&S", "Underwear"): 40, ("H&M", "Dress"): 20})
+    assert ui.plan_errors(ui.set_day(plan, "2026-11-27", d)) == []
+
+
+def test_last_planned_day_and_summary():
+    plan = {"default": {"total": 0, "allocations": {}, "fill_remainder": False},
+            "overrides": {"2026-11-25": {"total": 0, "allocations": {}, "fill_remainder": False},
+                          "2026-11-26": {"total": 100, "allocations": {"M&S": {"Dress": 100}}, "fill_remainder": False}}}
+    day, key = ui.last_planned_day(plan, "2026-11-27")
+    assert key == "2026-11-26" and day["allocations"] == {"M&S": {"Dress": 100}}
+    assert ui.last_planned_day(plan, "2026-11-26") == (None, None)
+    s = ui.quick_plan_summary({("M&S", "Dress"): 100}, {"limit": 2000, "usage": 93})
+    assert "Total 100" in s and "+15 reserve" in s and "1,907 / 2,000" in s

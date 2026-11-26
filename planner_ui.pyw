@@ -447,6 +447,68 @@ def save_plan_from_ui(plan, path=PLAN_FILE):
     return daily_plan.save_plan(plan, path), []
 
 
+# --- Quick plan: "how many tomorrow" per brand x category (pure) ----------------------
+# Owner 2026-11-26: "i still dont get how to plan tomorrows new products make it easier".
+# One box per category, the total is the sum, one Save writes the next run's day.
+
+def quick_plan_rows(build_rows_out, day):
+    """[{brand, category, available, planned}] for every category that has products to add
+    or a number already planned; brand order M&S, H&M, then most available first."""
+    out = []
+    for r in build_rows_out or []:
+        avail = r.get("pool") or 0
+        planned = planned_offers(day, r["brand"], r["category"])
+        if avail > 0 or planned > 0:
+            out.append({"brand": r["brand"], "category": r["category"], "available": avail, "planned": planned})
+    out.sort(key=lambda r: (0 if r["brand"] == MS else 1, -r["available"], r["category"]))
+    return out
+
+
+def parse_quick_value(text):
+    """'' -> 0, '40' -> 40; None for anything that is not a whole number >= 0."""
+    t = (text or "").strip()
+    if not t:
+        return 0
+    if not t.isdigit():
+        return None
+    return int(t)
+
+
+def quick_plan_day(values):
+    """{(brand, label): n} -> (day dict, errors). Total = the sum; no fill-remainder."""
+    errors, allocs = [], {}
+    for (brand, label), n in values.items():
+        if n is None:
+            errors.append(f"{brand} {label}: not a whole number")
+        elif n > 0:
+            allocs.setdefault(brand, {})[label] = n
+    total = sum(n for cats in allocs.values() for n in cats.values())
+    if total > daily_plan.MAX_TOTAL:
+        errors.append(f"total {total} is above Ozon's daily limit {daily_plan.MAX_TOTAL}")
+    return {"total": total, "allocations": allocs, "fill_remainder": False}, errors
+
+
+def last_planned_day(plan, before):
+    """Most recent override (date < before) with a total > 0, as a day dict, or None."""
+    overrides = plan.get("overrides") or {}
+    for key in sorted((k for k in overrides if k < before), reverse=True):
+        if (overrides[key] or {}).get("total"):
+            return get_day(plan, key), key
+    return None, None
+
+
+def quick_plan_summary(values, quota):
+    """One line: total, reserve, quota check."""
+    n = sum(v for v in values.values() if isinstance(v, int))
+    parts = [f"Total {n:,} offers"]
+    if n:
+        parts.append(f"+{daily_plan.reserve_for(n):,} reserve (15%, only used to reach the total)")
+    if quota:
+        left = quota["limit"] - quota["usage"]
+        parts.append(f"Ozon quota now {left:,} / {quota['limit']:,} (resets before the run)")
+    return "  ·  ".join(parts)
+
+
 # --- New Product Adding table (pure) -------------------------------------------------
 
 NP_PLAN_FILE = new_product_plan.PLAN_FILE
@@ -1781,12 +1843,25 @@ class PrioritizationTab(_WidgetHelpers):
         self.label(head, TAB_NEW_PRODUCT_ADDING, 14, bold=True).pack(side="left")
         self.built_label = self.label(head, "", 9, MUTED)
         self.built_label.pack(side="right")
-        self.cards = tk.Frame(outer, bg=BG)
-        self.cards.pack(fill="x", pady=(10, 0))
+        self.qp_vars = {}        # (brand, label) -> (StringVar, Entry)
+        self.qp_dirty = False
+        self.qp_date = None
+        self._qp_loading = False
+        self._build_quick_plan(outer)
 
-        self._build_np_table(outer)
-        self._build_editor(outer)
-        self._build_alloc_section(outer)
+        # Everything else (cards, URL notes, per-day editor, allocation table) -- collapsed.
+        self.adv_open = False
+        self.adv_toggle = tk.Button(outer, text="", command=self.toggle_adv, bg=BG, fg=MUTED,
+                                    activebackground=BG, activeforeground=FG, relief="flat", bd=0,
+                                    font=(FONT, 9, "bold"), anchor="w", cursor="hand2")
+        self.adv_toggle.pack(fill="x", pady=(10, 0))
+        self.adv_body = tk.Frame(outer, bg=BG)
+        self.cards = tk.Frame(self.adv_body, bg=BG)
+        self.cards.pack(fill="x", pady=(10, 0))
+        self._build_np_table(self.adv_body)
+        self._build_editor(self.adv_body)
+        self._build_alloc_section(self.adv_body)
+        self._update_adv_toggle()
         self._build_actions(outer)
 
         self.load_local()
@@ -1806,6 +1881,177 @@ class PrioritizationTab(_WidgetHelpers):
         self.label(f, title, 8, MUTED).pack(anchor="w")
         self.label(f, value, 15, FG, True).pack(anchor="w")
         self.label(f, sub, 8, sub_color, wraplength=self.px(220)).pack(anchor="w")
+
+    # ---------- quick plan (the simple way to plan the next run) ----------
+    def _build_quick_plan(self, parent):
+        tk = self.tk
+        f = tk.Frame(parent, bg=CARD, padx=12, pady=10)
+        f.pack(fill="both", expand=True, pady=(10, 0))
+        self.qp_title = self.label(f, "", 12, FG, True)
+        self.qp_title.pack(anchor="w")
+        self.label(f, "1. Type how many offers to add in each category (leave empty for none).   "
+                      "2. Press Save.   The 03:00 job adds exactly these -- the total is the sum.",
+                   9, MUTED, wraplength=self.px(1100)).pack(anchor="w", pady=(2, 6))
+        wrap = tk.Frame(f, bg=CARD)
+        bottom = tk.Frame(f, bg=CARD)
+        self.qp_msg = self.label(f, "", 9, MUTED, wraplength=self.px(1100))
+        self.qp_msg.pack(side="bottom", anchor="w", pady=(6, 0))
+        bottom.pack(side="bottom", fill="x", pady=(8, 0))
+        wrap.pack(fill="both", expand=True)
+        self.qp_canvas = tk.Canvas(wrap, bg=CARD, highlightthickness=0, bd=0, height=self.px(240))
+        sb = self.ttk.Scrollbar(wrap, orient="vertical", command=self.qp_canvas.yview)
+        self.qp_canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.qp_canvas.pack(side="left", fill="both", expand=True)
+        self.qp_grid = tk.Frame(self.qp_canvas, bg=CARD)
+        self._qp_win = self.qp_canvas.create_window((0, 0), window=self.qp_grid, anchor="nw")
+        self.qp_grid.bind("<Configure>", lambda e: self.qp_canvas.configure(scrollregion=self.qp_canvas.bbox("all")))
+        self.qp_canvas.bind("<Enter>", lambda e: self.qp_canvas.bind_all("<MouseWheel>", self._on_qp_wheel))
+        self.qp_canvas.bind("<Leave>", lambda e: self.qp_canvas.unbind_all("<MouseWheel>"))
+        self.qp_sum = self.label(bottom, "", 11, FG, True)
+        self.qp_sum.pack(side="left")
+        self.qp_save_btn = self.button(bottom, "Save plan", self.on_qp_save, accent=True)
+        self.qp_save_btn.pack(side="right")
+        self.button(bottom, "Clear all", self.on_qp_clear).pack(side="right", padx=(0, 6))
+        self.button(bottom, "Copy last plan", self.on_qp_copy).pack(side="right", padx=(0, 6))
+
+    def _on_qp_wheel(self, event):
+        try:
+            self.qp_canvas.yview_scroll(int(-event.delta / 120) or (-1 if event.delta > 0 else 1), "units")
+        except Exception:
+            pass
+
+    def _qp_target_date(self):
+        return next_new_products_day(load_json(HERE / NEW_PRODUCTS_STATUS_FILE, {}) or {})
+
+    def _qp_render(self, force=False):
+        """(Re)builds the boxes for the next run's date, prefilled from its saved plan. Keeps the
+        owner's unsaved typing unless force or the date moved."""
+        date = self._qp_target_date()
+        if self.qp_dirty and not force and date == self.qp_date:
+            self._qp_update()
+            return
+        self.qp_date = date
+        tomorrow = (_date.fromisoformat(self.today) + timedelta(days=1)).isoformat()
+        when = "tomorrow" if date == tomorrow else ("today" if date == self.today else date)
+        self.qp_title.configure(text=f"Plan the next run: {when}, {date} -- starts 03:00 Moscow")
+        day = get_day(self.plan, date) if has_override(self.plan, date) else \
+            {"total": 0, "allocations": {}, "fill_remainder": False}
+        rows = quick_plan_rows(build_rows(self.inventory, self.catalog, day, {}, self.hm_inventory, {}), day)
+        for w in self.qp_grid.winfo_children():
+            w.destroy()
+        self.qp_vars = {}
+        tk = self.tk
+        for c, (text, width) in enumerate((("Brand", 8), ("Category", 16), ("Available to add", 16),
+                                           ("How many", 10))):
+            tk.Label(self.qp_grid, text=text, bg=CARD, fg=MUTED, font=(FONT, 9, "bold"), width=width,
+                     anchor="w").grid(row=0, column=c, sticky="w", padx=(0, 8), pady=(0, 4))
+        self._qp_loading = True
+        for i, r in enumerate(rows, start=1):
+            tk.Label(self.qp_grid, text=r["brand"], bg=CARD, fg=FG, font=(FONT, 10), anchor="w").grid(
+                row=i, column=0, sticky="w", padx=(0, 8))
+            tk.Label(self.qp_grid, text=r["category"], bg=CARD, fg=FG, font=(FONT, 10), anchor="w").grid(
+                row=i, column=1, sticky="w", padx=(0, 8))
+            tk.Label(self.qp_grid, text=f"{r['available']:,}" if r["available"] else "--", bg=CARD, fg=MUTED,
+                     font=(FONT, 10), anchor="w").grid(row=i, column=2, sticky="w", padx=(0, 8))
+            var = tk.StringVar(value=str(r["planned"]) if r["planned"] else "")
+            ent = tk.Entry(self.qp_grid, textvariable=var, width=8, bg="#3f3f3b", fg=FG, insertbackground=FG,
+                           relief="solid", bd=1, highlightthickness=0, font=(FONT, 10), justify="right")
+            ent.grid(row=i, column=3, sticky="w", pady=1)
+            var.trace_add("write", lambda *a: self._qp_changed())
+            self.qp_vars[(r["brand"], r["category"])] = (var, ent, r["available"])
+        self._qp_loading = False
+        self.qp_dirty = False
+        saved = has_override(self.plan, date)
+        self.qp_msg.configure(text=(f"Saved plan for {date} loaded." if saved else
+                                    f"Nothing planned for {date} yet -- the job will add nothing until you save."),
+                              fg=MUTED if saved else STATUS["warning"])
+        self._qp_update()
+
+    def _qp_values(self):
+        return {k: parse_quick_value(var.get()) for k, (var, _e, _a) in self.qp_vars.items()}
+
+    def _qp_changed(self):
+        if self._qp_loading:
+            return
+        self.qp_dirty = True
+        self.qp_msg.configure(text="Not saved yet -- press Save plan.", fg=STATUS["warning"])
+        self._qp_update()
+
+    def _qp_update(self):
+        values = self._qp_values()
+        for k, (var, ent, avail) in self.qp_vars.items():
+            v = values[k]
+            ent.configure(bg=STATUS["critical"] if v is None else ("#6a5626" if v and v > avail else
+                                                                   ("#2f4a36" if v else "#3f3f3b")))
+        _day, errors = quick_plan_day(values)
+        self.qp_sum.configure(text=quick_plan_summary(values, self.quota),
+                              fg=STATUS["critical"] if errors else FG)
+        self.qp_save_btn.configure(state="disabled" if errors else "normal")
+
+    def on_qp_save(self):
+        date = self.qp_date
+        day, errors = quick_plan_day(self._qp_values())
+        if errors:
+            self.qp_msg.configure(text="Not saved: " + "; ".join(errors), fg=STATUS["critical"])
+            return
+        saved, errs = save_plan_from_ui(set_day(self.plan, date, day), str(HERE / PLAN_FILE))
+        if errs:
+            self.qp_msg.configure(text="Not saved: " + "; ".join(errs), fg=STATUS["critical"])
+            return
+        self.plan = saved
+        if self.day_key == date or not self.dirty:
+            self.day_key = date
+            self.day = get_day(self.plan, date)
+            self.dirty = False
+            self.total_var.set(str(self.day["total"]))
+            self.fill_var.set(self.day["fill_remainder"])
+            self.day_var.set(day_label(self.day_key, self.today))
+        self.qp_dirty = False
+        split = _plan_split_text(day)
+        over = [f"{b} {l}" for (b, l), (_v, _e, a) in self.qp_vars.items()
+                if (self._qp_values().get((b, l)) or 0) > a]
+        msg = (f"Saved ({datetime.now():%H:%M}). On {date} at 03:00 the job adds {day['total']} offers"
+               + (f": {split}" if split else " (nothing)") + ".")
+        if over:
+            msg += f"  Note: more than available in {', '.join(over)} -- the job adds what it finds."
+        self.qp_msg.configure(text=msg, fg=STATUS["good"])
+        self.render()
+
+    def on_qp_clear(self):
+        for var, _e, _a in self.qp_vars.values():
+            var.set("")
+
+    def on_qp_copy(self):
+        day, key = last_planned_day(self.plan, self.qp_date or self.today)
+        if not day:
+            self.qp_msg.configure(text="No earlier plan to copy.", fg=STATUS["warning"])
+            return
+        missing = []
+        for var, _e, _a in self.qp_vars.values():
+            var.set("")
+        for brand, cats in day["allocations"].items():
+            for label, n in cats.items():
+                if (brand, label) in self.qp_vars:
+                    self.qp_vars[(brand, label)][0].set(str(n))
+                else:
+                    missing.append(f"{brand} {label}")
+        self.qp_msg.configure(text=f"Copied the plan of {key}. Press Save plan to use it."
+                              + (f"  Not copied (nothing available now): {', '.join(missing)}" if missing else ""),
+                              fg=STATUS["warning"])
+
+    def _update_adv_toggle(self):
+        self.adv_toggle.configure(text=("▾ " if self.adv_open else "▸ ") +
+                                  "Advanced: other days, default plan, URL notes, details per category")
+
+    def toggle_adv(self):
+        self.adv_open = not self.adv_open
+        if self.adv_open:
+            self.adv_body.pack(fill="both", expand=True, after=self.adv_toggle)
+        else:
+            self._close_editor()
+            self.adv_body.pack_forget()
+        self._update_adv_toggle()
 
     # ---------- layout ----------
     def _build_np_table(self, parent):
@@ -1962,6 +2208,7 @@ class PrioritizationTab(_WidgetHelpers):
             self.np_plan = new_product_plan.load_plan(str(HERE / NP_PLAN_FILE))
             self.np_saved = copy.deepcopy(self.np_plan)
         self.render()
+        self._qp_render()
 
     def _roll_day(self):
         """The app can stay open past midnight UTC (03:00 Moscow, when the new-products job
@@ -2009,6 +2256,7 @@ class PrioritizationTab(_WidgetHelpers):
         self.quota = q
         self.quota_state = "ok" if q else "failed"
         self.render_cards()
+        self._qp_update()
 
     def _set_created(self, by_cat):
         self.created_by_cat = by_cat
@@ -2389,6 +2637,7 @@ class PrioritizationTab(_WidgetHelpers):
         self.dirty = False
         self.status_var.set(f"Saved {PLAN_FILE} ({datetime.now():%H:%M:%S}).")
         self.render()
+        self._qp_render()
 
     def on_clear_override(self):
         if not has_override(self.plan, self.day_key):
