@@ -26,6 +26,16 @@ def test_live_refresh_matches_sock_range_tokens(monkeypatch):
     assert unmatched == [ids[3]] and wrong == []
 
 
+def test_hm_sock_token_without_separator_matches():
+    import refresh_hm_stock as rh
+    info = {"sizes": {"1185566013": {"36-38": "c1", "39-41": "c2", "S": "c3"}}, "avail": {"c1", "c2", "c3"},
+            "few": {"c2"}}
+    assert rh.decide("HM-1185566013-3638", "1185566013", "3638", info) == (5, "in_stock")
+    assert rh.decide("HM-1185566013-3941", "1185566013", "3941", info) == (1, "few_left")
+    assert rh.decide("HM-1185566013-S", "1185566013", "S", info) == (5, "in_stock")
+    assert rh.decide("HM-1185566013-4", "1185566013", "4", info) == (None, "size_not_matched")
+
+
 def test_csv_builder_uses_sock_tokens():
     got = {u["offer_id"]: u["stock"] for u in us.build_stock_updates(pd.DataFrame(ROWS))}
     assert got["MS-T71004078C-PINKMIX-3-6Yaş"] == 1 and got["MS-T71004078C-PINKMIX-355-38"] == 7

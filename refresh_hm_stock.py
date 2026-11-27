@@ -177,6 +177,10 @@ def decide(oid, art, size, info):
         codes = list(sizes.values())
     elif size in sizes:
         codes = [sizes[size]]
+    elif size in (bare := {re.sub(r"[^0-9A-Z]", "", k): c for k, c in sizes.items()}):
+        # socks: offer_id token is the size name without separators ("36-38" -> "3638",
+        # hm_catalog.ru_size); found 2026-11-27 -- these were never matched, so never got stock
+        codes = [bare[size]]
     else:
         # e.g. HM-0868220003-4: the "-4" is likely a pack count, not an H&M size name — don't guess
         return None, "size_not_matched"
