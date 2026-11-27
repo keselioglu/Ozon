@@ -388,6 +388,7 @@ def pick_and_build(ms_found, hm_found, want, open_brands, remaining, dry_run, re
     queues.sort(key=lambda q: (0 if (q[0], q[1]) in per_left else 1, -weight(q[0], q[1])))
     chosen, spares, skipped = [], [], Counter()
     later, overflow = [], []   # not built yet / built but too big for its category's share
+    built_ids = set()
 
     def build(brand, label, p):
         """-> (entry, None) or (None, reason)."""
@@ -412,6 +413,11 @@ def pick_and_build(ms_found, hm_found, want, open_brands, remaining, dry_run, re
         ids = [it["offer_id"] for it in items]
         if len(set(ids)) != len(ids):
             return None, "two sizes map to the same offer_id (ambiguous)"
+        # Real run 2026-11-27: M&S lists one article/colour under two page URLs (…452607, …452610)
+        # -> the same offer_id was built twice, sent twice and counted twice.
+        if built_ids.intersection(ids):
+            return None, "same offer_id already built in this run (product on another page)"
+        built_ids.update(ids)
         return (brand, label, items, p.get("url") or p.get("rec", {}).get("article")), None
 
     for brand, label, products in queues:

@@ -55,6 +55,16 @@ def test_spares_complete_a_short_category(fake_build):
     assert sum(len(e[2]) for e in spares) <= 4   # reserve kept for failed imports, never above the target
 
 
+def test_same_offer_ids_from_two_pages_are_built_once(fake_build):
+    # real run 2026-11-27: one M&S article/colour on two page URLs -> MS-T74000123V-BLUEMIX-34 sent twice
+    hm_found = {"Dress": [_product("same", 2), _product("same", 2), _product("other", 2)]}
+    report = {}
+    chosen, spares = rnp.pick_and_build({}, hm_found, {("H&M", "Dress"): 10}, set(), _remaining(10), False, report)
+    ids = [it["offer_id"] for e in chosen + spares for it in e[2]]
+    assert len(ids) == len(set(ids)) == 4
+    assert report["skipped_at_build"]["same offer_id already built in this run (product on another page)"] == 1
+
+
 def test_take_spares_whole_products_only():
     spares = [("H&M", "Dress", [1, 2, 3], "a"), ("H&M", "Dress", [1], "b"), ("H&M", "Top", [1, 2], "c")]
     got = rnp.take_spares(spares, 3)
