@@ -64,8 +64,11 @@ def build_stock_updates(df):
         # exactly what was actually uploaded. NOT map_size_to_ozon's ru_size — that's
         # the Ozon size ATTRIBUTE value, a different number than what's embedded in
         # the offer_id (see ozon_mapping.map_size_to_eu for why).
-        from ozon_mapping import map_size_to_eu
-        eu_size, _ = map_size_to_eu(row.get("size_label"))
+        from ozon_mapping import is_socks, map_size_to_eu, map_sock_size_to_offer_id_token
+        if is_socks(row.get("name")):   # socks embed the raw range token, as in build_ozon_item
+            eu_size, _ = map_sock_size_to_offer_id_token(row.get("size_label"))
+        else:
+            eu_size, _ = map_size_to_eu(row.get("size_label"))
         if not eu_size:
             continue
 

@@ -58,7 +58,8 @@ if sys.platform == "win32":
 
 from crawler import extract_product
 from ozon_client import call
-from ozon_mapping import extract_article_code_from_offer_id, extract_eu_size, extract_letter_size
+from ozon_mapping import (extract_article_code_from_offer_id, extract_eu_size, extract_letter_size,
+                          map_sock_size_to_offer_id_token)
 from category_priority import fetch_live_ms_identifiers
 from warehouse_routing import build_routed_stock_updates
 
@@ -290,6 +291,10 @@ def build_stock_updates_for_url(url, offer_ids_for_url):
     # one is present on the label is tried; a numeric offer_id token only matches
     # a numeric label EU number, a letter token only matches a letter label.
     fresh_by_size_token = {}
+    # Socks: the offer_id ends in the whole range token ("-3-6Yaş", "-355-38", see
+    # ozon_mapping.map_sock_size_to_offer_id_token), which extract_size_token cuts at the last
+    # "-" -- found 2026-11-27: every M&S sock offer was zeroed nightly. Matched on the suffix.
+    sock_tokens = {}
     for v in variant_rows:
         label = (v.get("size_label") or "").strip()
         stock = v.get("stock_count")
@@ -302,12 +307,18 @@ def build_stock_updates_for_url(url, offer_ids_for_url):
             fresh_by_size_token[eu_size] = stock
         if letter_size:
             fresh_by_size_token[letter_size] = stock
+        sock_token, _w = map_sock_size_to_offer_id_token(label)
+        if sock_token and "-" in sock_token:
+            sock_tokens["-" + sock_token.upper()] = stock
 
     updates = []
     unmatched = []
     for offer_id in offer_ids_for_url:
         size_token = extract_size_token(offer_id)
-        if size_token and size_token.upper() in fresh_by_size_token:
+        sock_hit = next((s for t, s in sock_tokens.items() if offer_id.upper().endswith(t)), None)
+        if sock_hit is not None:
+            updates.append({"offer_id": offer_id, "stock": sock_hit})
+        elif size_token and size_token.upper() in fresh_by_size_token:
             updates.append({"offer_id": offer_id, "stock": fresh_by_size_token[size_token.upper()]})
         elif size_token and size_token in fresh_by_size_token:
             updates.append({"offer_id": offer_id, "stock": fresh_by_size_token[size_token]})
