@@ -783,6 +783,13 @@ def run(dry_run=False, today=None, test_products=None, test_offers=None):
                 if x_ok:
                     push_stock(x_ok)
                     count_rejected(x_ok)
+        # Real test 3, 2026-11-27: Ozon could not download some H&M photos for 50 of 100 cards
+        # (pics_http_error; a test 4 h earlier had none). Send those cards' photos once more.
+        live = [it for it in ok if it["offer_id"] not in (report.get("rejected") or {})]
+        retried = retry_failed_images(live)
+        if retried:
+            report["images_resent"] = retried
+            log(f"  photos sent again for {len(retried)} card(s) Ozon could not download them for")
     bad_any = bad or report.get("rejected") or report.get("stock_not_pushed")
     report["state"] = "completed" if not bad_any else "completed_with_errors"
     return report
@@ -810,6 +817,35 @@ def wait_for_prices(offer_ids, timeout=None, every=None):
             return have
         log(f"  waiting for Ozon prices: {len(have)}/{len(want)} ready")
         time.sleep(every)
+
+
+IMAGE_ERROR_CODES = {"pics_http_error", "primary_image_load_failed", "some_image_failed"}
+
+
+def retry_failed_images(items):
+    """Re-imports, unchanged, the cards Ozon flagged with an image download error -- Ozon then
+    downloads the photos again (/v1/product/pictures/import is obsolete: "code 9"). -> sorted
+    offer_ids re-imported. Errors are logged, never raised."""
+    from ozon_client import call
+    by_id = {it["offer_id"]: it for it in items if it.get("images")}
+    flagged = []
+    ids = sorted(by_id)
+    for i in range(0, len(ids), 100):
+        try:
+            cards = call("/v3/product/info/list", {"offer_id": ids[i:i + 100]}).get("items", [])
+        except Exception as e:
+            log(f"  photo check failed: {e}")
+            continue
+        flagged += [by_id[c["offer_id"]] for c in cards if c.get("offer_id") in by_id and
+                    IMAGE_ERROR_CODES.intersection(e.get("code") for e in c.get("errors") or [])]
+    if not flagged:
+        return []
+    try:
+        st, _er = wait_for_import(upload(flagged))
+    except Exception as e:
+        log(f"  ! photos not re-sent: {str(e)[:160]}")
+        return []
+    return sorted(o for o, s in st.items() if s == "imported")
 
 
 def resend_without_hashtags(items):

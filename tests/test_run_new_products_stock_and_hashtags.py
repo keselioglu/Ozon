@@ -43,6 +43,20 @@ def test_wait_for_prices_gives_up_at_timeout(monkeypatch):
     assert rnp.wait_for_prices(["A", "B"], timeout=0, every=1) == {"A"}
 
 
+def test_retry_failed_images_resends_only_flagged_cards(monkeypatch):
+    import ozon_client
+    monkeypatch.setattr(ozon_client, "call", lambda path, body: {"items": [
+        {"offer_id": "A", "id": 11, "errors": [{"code": "pics_http_error", "level": "ERROR_LEVEL_WARNING"}]},
+        {"offer_id": "B", "id": 12, "errors": [{"code": "double_without_merger_offer"}]},
+        {"offer_id": "C", "id": 13, "errors": []}]})
+    sent = []
+    monkeypatch.setattr(rnp, "upload", lambda its: sent.append(its) or ["t"])
+    monkeypatch.setattr(rnp, "wait_for_import", lambda t: ({i["offer_id"]: "imported" for i in sent[-1]}, {}))
+    items = [{"offer_id": o, "images": ["u1", "u2"], "primary_image": "u2"} for o in "ABC"]
+    assert rnp._real_retry_failed_images(items) == ["A"]
+    assert sent == [[items[0]]]                     # the same card, unchanged
+
+
 def _entry(art, n):
     return ("H&M", "Underwear", [{"offer_id": f"HM-{art}-{i}", "type_id": TYPE_ID_PANTIES, "price": "1",
                                   "name": "x", "_stock": 3,
