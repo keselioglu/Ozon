@@ -30,7 +30,7 @@ def test_run_replaces_rejected_with_spares(monkeypatch):
     chosen = [_entry("H&M", "1000000001", 2), _entry("H&M", "1000000002", 2)]
     spares = [_entry("H&M", "1000000003", 2)]
     remaining = {"total": 4, "plan_total": 4, "created_before": 0, "quota_left": 100, "per_category": {}}
-    monkeypatch.setattr(rnp, "targets_for_today", lambda t, n: (remaining, {("H&M", "Underwear"): 4}, {"H&M"}))
+    monkeypatch.setattr(rnp, "targets_for_today", lambda t, n, o=None: (remaining, {("H&M", "Underwear"): 4}, {"H&M"}))
     monkeypatch.setattr(rnp, "labels_for", lambda b, w, o: [])
     monkeypatch.setattr(rnp, "ms_candidates", lambda *a: {})
 

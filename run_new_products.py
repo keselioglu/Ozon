@@ -74,7 +74,7 @@ def log(msg=""):
 
 # --- 1. what is left to create today -------------------------------------------------------
 
-def targets_for_today(today, test_products=None):
+def targets_for_today(today, test_products=None, test_offers=None):
     """-> (remaining dict from daily_plan.remaining_today, {(brand, label): offers wanted},
     open_brands) -- open_brands: brands that may take any category (fill_remainder with no
     allocation for them). test_products=N (owner's pre-run tests, 2026-11-26): a REAL run of
@@ -83,8 +83,8 @@ def targets_for_today(today, test_products=None):
     from upload_to_ozon import check_quota
     import product_rules as pr
     rules, cached = None, {}
-    if test_products and not pr.rules_exist():
-        raise RuntimeError("--test needs the saved rules (new_product_rules.json)")
+    if (test_products or test_offers) and not pr.rules_exist():
+        raise RuntimeError("--test / --test-offers need the saved rules (new_product_rules.json)")
     if pr.rules_exist():
         # Owner rules (app: New Product Adding): daily number, price limits, priorities -- the
         # last saved ones decide now. The split per category comes from the cached data; the
@@ -97,6 +97,11 @@ def targets_for_today(today, test_products=None):
             rules = dict(rules, daily_offers=sum(p["offers"] for p in first) or test_products)
             log(f"TEST run: ~{test_products} products -> {rules['daily_offers']} offers (today's earlier "
                 "uploads not counted)")
+        elif test_offers:
+            # owner's extra one-off test runs (2026-11-27): N offers under the saved priorities and
+            # price limits; today's earlier uploads are not counted
+            rules = dict(rules, daily_offers=test_offers)
+            log(f"TEST run: {test_offers} offers (today's earlier uploads not counted)")
         day, preview = pr.plan_day_from_rules(rules, candidates)
         plan = {"version": 1, "default": day, "overrides": {}}
         for c in candidates:
@@ -114,7 +119,7 @@ def targets_for_today(today, test_products=None):
         dc = quota.get("daily_create", {})
         q_left = dc.get("limit", 0) - dc.get("usage", 0)
     created_total, created_by_cat = daily_plan.created_today(today=today)
-    if test_products:
+    if test_products or test_offers:
         created_total, created_by_cat = 0, {}
     remaining = daily_plan.remaining_today(plan, q_left, created_total, created_by_cat, today)
     log(f"Plan {today}: total {day['total']}, created so far {created_total}, quota left {q_left} "
@@ -596,16 +601,18 @@ def telegram(text):
         log(f"Telegram not sent: {e}")
 
 
-def run(dry_run=False, today=None, test_products=None):
+def run(dry_run=False, today=None, test_products=None, test_offers=None):
     today = today or daily_plan.utc_today()
     started = datetime.now()
     report = {"date": today, "dry_run": dry_run, "started_at": started.isoformat(timespec="seconds"),
               "state": "running", "ms_found": {}, "hm_found": {}, "created": {}, "failed": {}}
     if test_products:
         report["test_products"] = test_products
+    if test_offers:
+        report["test_offers"] = test_offers
     if not dry_run:
         write_json(STATUS_FILE, report)
-    remaining, want, open_brands = targets_for_today(today, test_products)
+    remaining, want, open_brands = targets_for_today(today, test_products, test_offers)
     report["plan"] = {"total": remaining["plan_total"], "left": remaining["total"],
                       "created_before": remaining["created_before"], "quota_left": remaining["quota_left"],
                       "allocations": {f"{b}/{l}": n for (b, l), n in want.items()}, "open_brands": sorted(open_brands)}
@@ -764,7 +771,12 @@ def main(argv=None):
     ap.add_argument("--test", type=int, metavar="N",
                     help="REAL run of about N whole products under the saved rules, ignoring what was "
                          "already created today (owner's pre-run tests)")
+    ap.add_argument("--test-offers", type=int, metavar="N",
+                    help="REAL one-off run of N offers under the saved rules, ignoring what was already "
+                         "created today (owner's extra test runs)")
     a = ap.parse_args(argv)
+    if a.test and a.test_offers:
+        ap.error("use either --test or --test-offers")
     if a.date and not a.dry_run:
         ap.error("--date only with --dry-run")
     if os.path.exists(LOCK_FILE) and time.time() - os.path.getmtime(LOCK_FILE) < 6 * 3600:
@@ -775,7 +787,7 @@ def main(argv=None):
     report = {"date": a.date or daily_plan.utc_today(), "dry_run": a.dry_run}
     rc = 0
     try:
-        report = run(dry_run=a.dry_run, today=a.date, test_products=a.test)
+        report = run(dry_run=a.dry_run, today=a.date, test_products=a.test, test_offers=a.test_offers)
     except Exception as e:
         rc = 1
         report.update(state="failed", error=f"{type(e).__name__}: {e}", traceback=traceback.format_exc()[-3000:])
@@ -797,7 +809,7 @@ def main(argv=None):
                                ensure_ascii=False, default=str) + "\n")
         if report.get("state") not in ("nothing_planned",):
             created = sum(report.get("created", {}).values())
-            text = (("TEST " if a.test else "") + f"Ozon new products {report['date']}: {report.get('state')}\n"
+            text = (("TEST " if (a.test or a.test_offers) else "") + f"Ozon new products {report['date']}: {report.get('state')}\n"
                     f"created {created} offer(s): {report.get('created') or '-'}\n"
                     f"not imported: {len(report.get('failed') or {})}")
             if report.get("hm_error"):
