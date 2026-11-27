@@ -16,6 +16,29 @@ from ozon_client import call
 # extract_article_code_from_offer_id below.
 ARTICLE_CODE_IN_OFFER_ID_RE = re.compile(r"T\d{5,9}[A-Z]{0,2}")
 
+# Ozon rule BR_hashtags_symbols_validation: only letters, digits, '#' and '_'. Real run 2026-11-27:
+# a cached tag "#трусысприн�ом" (broken character) got the card refused at moderation.
+HASHTAG_RE = re.compile(r"#[0-9_а-яё]+")
+_HASHTAG_BRAND_RE = re.compile(r"marks|spencer|марк|спенсер|эйчэндэм", re.IGNORECASE)
+
+
+def clean_hashtags(hashtags):
+    """Hashtags as sent to Ozon: only well-formed lowercase Cyrillic tags, no brand words, no
+    duplicates. Bad tags are dropped (the card is valid with fewer). Cached translations are
+    never re-validated, so every item builder sends its hashtags through this."""
+    out = []
+    for tag in (hashtags or "").split():
+        tag = tag.lower()
+        if HASHTAG_RE.fullmatch(tag) and not _HASHTAG_BRAND_RE.search(tag) and tag not in out:
+            out.append(tag)
+    return " ".join(out)
+
+
+def hashtag_attribute(attr_id, hashtags):
+    """[attribute] for the hashtags field, or [] when nothing valid is left."""
+    tags = clean_hashtags(hashtags)
+    return [{"id": attr_id, "values": [{"value": tags}]}] if tags else []
+
 
 def extract_article_code_from_offer_id(offer_id):
     """Returns the M&S article code embedded in offer_id (e.g. 'T61008800T'),

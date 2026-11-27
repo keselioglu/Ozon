@@ -49,6 +49,7 @@ def test_run_replaces_rejected_with_spares(monkeypatch):
                         types.SimpleNamespace(push_stock_updates_for=lambda u: pushed.append(len(u))))
     monkeypatch.setattr(rnp, "rejected_after_import",
                         lambda ids: {o: ["SPU_ALREADY_EXISTS_IN_ANOTHER_ACCOUNT"] for o in ids if "1000000002" in o})
+    monkeypatch.setattr(rnp, "wait_for_prices", lambda ids: set(ids))
     rep = rnp.run(today="2026-11-27")
     assert sent[1] == ["HM-1000000003-0", "HM-1000000003-1"]      # spare product uploaded instead
     assert rep["created"] == {"H&M/Underwear": 4}                  # 2 ok + 2 replacement, rejected not counted

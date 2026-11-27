@@ -176,6 +176,7 @@ OUTPUT_SCHEMA = {
 _LATIN_RE = re.compile(r"[A-Za-z]")
 _ALLOWED_LATIN_TOKENS = re.compile(r"MarksSpencer|™")
 _BRAND_WORDS_RE = re.compile(r"marks|spencer|марк|спенсер", re.IGNORECASE)
+from ozon_mapping import HASHTAG_RE as _HASHTAG_RE  # noqa: E402  (Ozon's allowed hashtag characters)
 
 
 def _has_disallowed_latin(text):
@@ -202,6 +203,8 @@ def _validate_hashtags(hashtags):
             raise ValueError(f"hashtag {tag!r} contains a brand reference — not allowed")
         if _LATIN_RE.search(tag):
             raise ValueError(f"hashtag {tag!r} contains a Latin character — not allowed")
+        if not _HASHTAG_RE.fullmatch(tag):
+            raise ValueError(f"hashtag {tag!r} has characters Ozon does not allow")
 
 
 def _validate_translation(entry, is_underwear):

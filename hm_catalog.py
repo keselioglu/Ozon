@@ -23,7 +23,7 @@ import re
 from ozon_mapping import (
     ATTR_BRAND, ATTR_COLOR, ATTR_GENDER, ATTR_SIZE, ATTR_TYPE, CATEGORY_ID_CLOTHING, GENDER_FEMALE_ID,
     LETTER_TO_RU_SIZE, RU_SIZE_UNIVERSAL_ID, TYPE_ID_SOCKS, _load_color_dict, _load_size_dict,
-    resolve_category_and_type,
+    hashtag_attribute, resolve_category_and_type,
 )
 
 BRAND_HM_ID = 5097273          # Ozon brand dictionary "H&M" (as on the live H&M listings)
@@ -188,8 +188,7 @@ def build_items(rec, detail, translation, usd_rate, dims):
             {"id": ATTR_MATERIAL_COMPOSITION, "values": [{"value": translation["material_composition"]}]},
             {"id": ATTR_COLLECTION, "values": [{"dictionary_value_id": COLLECTION_ID}]},
             {"id": ATTR_WARRANTY, "values": [{"dictionary_value_id": WARRANTY_ID}]},
-            {"id": ATTR_HASHTAGS, "values": [{"value": translation["hashtags"]}]},
-        ]
+        ] + hashtag_attribute(ATTR_HASHTAGS, translation.get("hashtags"))
         if translation.get("material_id"):
             attrs.append({"id": ATTR_MATERIAL, "values": [{"dictionary_value_id": translation["material_id"]}]})
         if translation.get("planting_type_id"):

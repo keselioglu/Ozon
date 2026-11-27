@@ -24,7 +24,7 @@ from color_dedup import classify_english_color, is_clearly_different_color, offe
 from ozon_client import call
 from ozon_mapping import (
     ATTR_BRAND, ATTR_COLOR, ATTR_GENDER, ATTR_SIZE, ATTR_TYPE, BRAND_MARKS_AND_SPENCER_ID,
-    CATEGORY_ID_CLOTHING, extract_article_code_from_offer_id, is_socks, log_mapping_decision,
+    CATEGORY_ID_CLOTHING, extract_article_code_from_offer_id, hashtag_attribute, is_socks, log_mapping_decision,
     map_color_to_ozon, map_size_to_eu, map_size_to_ozon, map_sock_size_to_offer_id_token,
     map_sock_size_to_ozon, resolve_category_and_type, resolve_gender,
 )
@@ -210,8 +210,7 @@ def build_ozon_item(row, offer_id_suffix=""):
         {"id": ATTR_MATERIAL_COMPOSITION, "values": [{"value": translation["material_composition"]}]},
         {"id": ATTR_COLLECTION, "values": [{"dictionary_value_id": COLLECTION_ID}]},
         {"id": ATTR_WARRANTY, "values": [{"dictionary_value_id": WARRANTY_ID}]},
-        {"id": ATTR_HASHTAGS, "values": [{"value": translation["hashtags"]}]},
-    ]
+    ] + hashtag_attribute(ATTR_HASHTAGS, translation.get("hashtags"))
     if translation.get("material_id"):
         attributes.append({"id": ATTR_MATERIAL, "values": [{"dictionary_value_id": translation["material_id"]}]})
     if translation.get("planting_type_id"):

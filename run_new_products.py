@@ -700,10 +700,21 @@ def run(dry_run=False, today=None, test_products=None, test_offers=None):
 
     def push_stock(its):
         import update_stocks as us
-        updates = [{"offer_id": it["offer_id"], "stock": it["_stock"]} for it in its]
+        # Real run 2026-11-27: the push ran 1 s after a fast import, Ozon had no prices yet, the
+        # warehouse routing skipped 499 of 500 offers and none got stock. Wait for the prices first.
+        priced = wait_for_prices([it["offer_id"] for it in its])
+        updates = [{"offer_id": it["offer_id"], "stock": it["_stock"]} for it in its if it["offer_id"] in priced]
+        missing = [it["offer_id"] for it in its if it["offer_id"] not in priced]
+        if missing:
+            log(f"  ! {len(missing)} offer(s) still have no Ozon price -- stock not pushed for them")
+            report.setdefault("stock_not_pushed", []).extend(missing)
+        if not updates:
+            return
         log(f"Pushing stock for the {len(updates)} new offer(s) only...")
-        us.push_stock_updates_for(updates)
+        res = us.push_stock_updates_for(updates)
         report["stock_pushed"] = report.get("stock_pushed", 0) + len(updates)
+        if isinstance(res, tuple) and res[1]:
+            report["stock_push_failed_rows"] = report.get("stock_push_failed_rows", 0) + res[1]
 
     def count_rejected(its):
         rej = rejected_after_import([it["offer_id"] for it in its])
@@ -726,7 +737,22 @@ def run(dry_run=False, today=None, test_products=None, test_offers=None):
         if rej:
             log(f"{len(rej)} imported offer(s) rejected by Ozon after moderation: "
                 f"{sorted({c for v in rej.values() for c in v})}")
-            extra = take_spares(spares, len(rej))
+            # Refused only for the hashtags (real run 2026-11-27: BR_hashtag_brand on brand-free tags,
+            # BR_hashtags_symbols_validation): send the same cards again without hashtags.
+            tag_only = [it for it in ok if it["offer_id"] in rej and all(c.startswith(HASHTAG_ERROR_PREFIX)
+                                                                         for c in rej[it["offer_id"]])]
+            if tag_only:
+                fixed = resend_without_hashtags(tag_only)
+                for it in tag_only:
+                    if it["offer_id"] in fixed:
+                        del report["rejected"][it["offer_id"]]
+                        k = (f"{daily_plan.brand_for_offer_id(it['offer_id'])}/"
+                             f"{daily_plan.category_label_for_type(it['type_id'])}")
+                        report["created"][k] = report["created"].get(k, 0) + 1
+                        rej.pop(it["offer_id"])
+                report["hashtags_removed"] = sorted(fixed)
+                log(f"  {len(fixed)} of {len(tag_only)} card(s) sent again without hashtags")
+            extra = take_spares(spares, len(rej)) if rej else []
             if extra:
                 log(f"Uploading {sum(len(e[2]) for e in extra)} reserve offer(s) instead")
                 x_items, x_status, _x_errors = send(extra)
@@ -739,9 +765,45 @@ def run(dry_run=False, today=None, test_products=None, test_offers=None):
                 if x_ok:
                     push_stock(x_ok)
                     count_rejected(x_ok)
-    bad_any = bad or report.get("rejected")
+    bad_any = bad or report.get("rejected") or report.get("stock_not_pushed")
     report["state"] = "completed" if not bad_any else "completed_with_errors"
     return report
+
+
+HASHTAG_ERROR_PREFIX = "BR_hashtag"
+PRICE_WAIT_S, PRICE_POLL_S = 900, 30
+
+
+def wait_for_prices(offer_ids, timeout=None, every=None):
+    """-> set of offer_ids Ozon already has a sale price for, polling until all have one or the
+    timeout runs out. Stock routing ($60 rule) needs that price. Read-only."""
+    from warehouse_routing import fetch_final_prices
+    timeout = PRICE_WAIT_S if timeout is None else timeout
+    every = PRICE_POLL_S if every is None else every
+    want, have = set(offer_ids), set()
+    deadline = time.time() + timeout
+    while True:
+        try:
+            have = {o for o, p in fetch_final_prices(sorted(want)).items() if p}
+        except Exception as e:
+            log(f"  price check failed: {e}")
+        if have >= want or time.time() >= deadline:
+            return have
+        log(f"  waiting for Ozon prices: {len(have)}/{len(want)} ready")
+        time.sleep(every)
+
+
+def resend_without_hashtags(items):
+    """Re-imports the same cards with the hashtags attribute removed. -> set of imported offer_ids."""
+    from upload_to_ozon import ATTR_HASHTAGS
+    clean = [dict(it, attributes=[a for a in it.get("attributes", []) if a.get("id") != ATTR_HASHTAGS])
+             for it in items]
+    try:
+        st, _er = wait_for_import(upload(clean))
+    except Exception as e:
+        log(f"  re-sending without hashtags failed: {e}")
+        return set()
+    return {o for o, s in st.items() if s == "imported"}
 
 
 def rejected_after_import(offer_ids):
@@ -817,6 +879,10 @@ def main(argv=None):
             if report.get("rejected"):
                 codes = sorted({c for v in report["rejected"].values() for c in v})
                 text += f"\nrejected by Ozon after moderation: {len(report['rejected'])} {codes}"
+            if report.get("hashtags_removed"):
+                text += f"\nsent again without hashtags: {len(report['hashtags_removed'])}"
+            if report.get("stock_not_pushed"):
+                text += f"\nNO STOCK pushed (no Ozon price yet): {len(report['stock_not_pushed'])}"
             rs = report.get("reserve") or {}
             if rs:
                 text += (f"\nreserve +15%: {rs.get('built', 0)}/{rs.get('planned', 0)} built, used "
