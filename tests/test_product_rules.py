@@ -10,9 +10,14 @@ def cand(brand, label, n, cost, key=None):
 
 
 def rules(**kw):
-    r = pr.default_rules()
+    r = dict(pr.default_rules(), daily_offers=0, min_sale_usd=0, max_cost_try=0)
     r.update(kw)
     return r
+
+
+def test_owner_defaults_when_nothing_saved(tmp_path):
+    r = pr.load_rules(str(tmp_path / "missing.json"))
+    assert (r["daily_offers"], r["min_sale_usd"], r["max_cost_try"]) == (500, 15, 8000)
 
 
 def test_allocate_by_weight_and_caps():

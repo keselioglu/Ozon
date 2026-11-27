@@ -33,8 +33,13 @@ BRANDS = ("M&S", "H&M")
 
 # --- rules file -----------------------------------------------------------------------------
 
+# Owner's defaults (2026-11-27): what the app shows when no rules were saved yet / the file is broken.
+DEFAULT_DAILY_OFFERS, DEFAULT_MIN_SALE_USD, DEFAULT_MAX_COST_TRY = 500, 15, 8000
+
+
 def default_rules():
-    return {"version": 1, "daily_offers": 0, "min_sale_usd": 0, "max_cost_try": 0, "priorities": {}}
+    return {"version": 1, "daily_offers": DEFAULT_DAILY_OFFERS, "min_sale_usd": DEFAULT_MIN_SALE_USD,
+            "max_cost_try": DEFAULT_MAX_COST_TRY, "priorities": {}}
 
 
 def cat_key(brand, label):

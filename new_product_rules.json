@@ -1,13 +1,13 @@
 {
   "version": 1,
-  "daily_offers": 100,
-  "min_sale_usd": 0,
-  "max_cost_try": 0,
+  "daily_offers": 500,
+  "min_sale_usd": 15,
+  "max_cost_try": 8000,
   "priorities": {
     "H&M/Underwear": "top",
     "H&M/Underwear Set": "top",
     "M&S/Underwear": "top",
     "M&S/Underwear Set": "top"
   },
-  "updated_at": "2026-11-26T09:24:35+00:00"
+  "updated_at": "2026-11-27T07:09:31+00:00"
 }
