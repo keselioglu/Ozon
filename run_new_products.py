@@ -729,7 +729,13 @@ def run(dry_run=False, today=None, test_products=None, test_offers=None):
         return rej
 
     if ok:
+        imported_at = time.time()
         push_stock(ok)
+        # Real run 2026-11-27: two SPU_ALREADY_EXISTS refusals came ~1 min after the check ran.
+        wait = imported_at + REJECT_CHECK_DELAY_S - time.time()
+        if wait > 0:
+            log(f"Waiting {int(wait)} s for Ozon moderation before checking for refused cards...")
+            time.sleep(wait)
         # Reserve, step 3 (added 2026-11-26, real test 2): an offer can be imported and still be
         # refused at moderation (e.g. SPU_ALREADY_EXISTS_IN_ANOTHER_ACCOUNT). Those never go on
         # sale, so they don't count as created and are replaced with spare products once.
@@ -772,6 +778,7 @@ def run(dry_run=False, today=None, test_products=None, test_offers=None):
 
 HASHTAG_ERROR_PREFIX = "BR_hashtag"
 PRICE_WAIT_S, PRICE_POLL_S = 900, 30
+REJECT_CHECK_DELAY_S = 300
 
 
 def wait_for_prices(offer_ids, timeout=None, every=None):
