@@ -92,6 +92,14 @@ class HMBrowser:
                 return None
             last = r
             time.sleep(2 + 3 * attempt)
+            if r.get("status") == 0 and attempt < retries:
+                # an aborted in-page fetch (2026-11-27 03:10) leaves the tab stuck: reload it first
+                try:
+                    self.page.goto("https://www2.hm.com/tr_tr/index.html", wait_until="domcontentloaded",
+                                   timeout=60000)
+                    self.page.wait_for_timeout(3000)
+                except Exception:
+                    pass
         raise HMError(f"{url}: {last}")
 
     def listing(self, path, page=1):

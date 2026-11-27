@@ -272,7 +272,14 @@ def hm_candidates(labels, want, remaining, report, hm):
         while page <= min(total, HM_PAGES_PER_SECTION):
             if all(got[l] >= goal[l] for l in labels):
                 break
-            hits, total = hm.listing(path, page)
+            try:
+                hits, total = hm.listing(path, page)
+            except Exception as e:  # 2026-11-27 03:00: one aborted page fetch killed the whole run
+                log(f"  ! H&M {path.rsplit('/', 1)[-1]} page {page} unreadable, skipping the rest of "
+                    f"this section: {str(e)[:160]}")
+                skips["listing page unreadable"] += 1
+                page += 1
+                break
             page += 1
             for h in hits:
                 rec = hc.summarize_hit(h)
@@ -288,7 +295,11 @@ def hm_candidates(labels, want, remaining, report, hm):
                     continue
                 if got[label] >= goal[label]:
                     continue
-                detail = hm.product(rec["article"])
+                try:
+                    detail = hm.product(rec["article"])
+                except Exception as e:
+                    log(f"  ! H&M product {rec['article']} unreadable: {str(e)[:120]}")
+                    detail = None
                 if not detail:
                     skips["product page gone"] += 1
                     continue
@@ -609,11 +620,17 @@ def run(dry_run=False, today=None, test_products=None):
     hm_found = {}
     if hm_labels:
         from hm_site import HMBrowser
-        if not wait_for_hm_port():
-            raise RuntimeError("H&M Chrome port still busy after 30 min")
-        log(f"H&M: categories {hm_labels}")
-        with HMBrowser() as hm:
-            hm_found = hm_candidates(hm_labels, want, remaining, report, hm)
+        try:
+            if not wait_for_hm_port():
+                raise RuntimeError("H&M Chrome port still busy after 30 min")
+            log(f"H&M: categories {hm_labels}")
+            with HMBrowser() as hm:
+                hm_found = hm_candidates(hm_labels, want, remaining, report, hm)
+        except Exception as e:
+            # H&M down must not cost the M&S part of the day (the reserve/other categories fill in).
+            log(f"! H&M unavailable, continuing with M&S only: {type(e).__name__}: {str(e)[:200]}")
+            report["hm_error"] = f"{type(e).__name__}: {str(e)[:300]}"
+            hm_found = {}
 
     log("Picking whole products and building Ozon items...")
     chosen, spares = pick_and_build(ms_found, hm_found, want, open_brands, remaining, dry_run, report)
@@ -783,6 +800,8 @@ def main(argv=None):
             text = (("TEST " if a.test else "") + f"Ozon new products {report['date']}: {report.get('state')}\n"
                     f"created {created} offer(s): {report.get('created') or '-'}\n"
                     f"not imported: {len(report.get('failed') or {})}")
+            if report.get("hm_error"):
+                text += f"\nH&M skipped: {report['hm_error'][:200]}"
             if report.get("rejected"):
                 codes = sorted({c for v in report["rejected"].values() for c in v})
                 text += f"\nrejected by Ozon after moderation: {len(report['rejected'])} {codes}"
