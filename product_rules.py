@@ -239,9 +239,22 @@ def ms_candidates_from_csv(products_csv, live_tokens, label_for_name):
     return [p for p in by_url.values() if not p["live"] and p["label"] and p["offers"] > 0]
 
 
-def hm_candidates_from_inventory(hm_inventory):
+def live_hm_tokens(live_offer_ids):
+    """10-digit H&M articles of the offers on Ozon (HM-<article>-<size>)."""
+    out = set()
+    for oid in live_offer_ids or []:
+        if isinstance(oid, str) and oid.startswith("HM-"):
+            out.add(oid[3:].split("-", 1)[0])
+    return out
+
+
+def hm_candidates_from_inventory(hm_inventory, live_articles=()):
+    """H&M inventory candidates; articles already on Ozon (live_articles) are left out -- the
+    inventory file is older than the uploads since it was built."""
     out = []
     for c in (hm_inventory or {}).get("candidates") or []:
+        if str(c.get("article")) in live_articles:
+            continue
         if c.get("label") and c.get("offers"):
             out.append({"brand": "H&M", "key": c.get("article"), "article": c.get("article"),
                         "url": f"https://www2.hm.com/tr_tr/productpage.{c.get('article')}.html",
@@ -305,15 +318,25 @@ def build_plan(rules, candidates):
             "allocation": {cat: used.get(cat, 0) for cat in order if used.get(cat, 0)}}
 
 
-def load_candidates(repo=".", products_csv="products.csv"):
-    """Cached candidates for the plan preview (M&S products.csv + H&M hm_inventory.json)."""
+def load_candidates(repo=".", products_csv="products.csv", live_offer_ids=None):
+    """Cached candidates for the plan preview (M&S products.csv + H&M hm_inventory.json), minus
+    the products already on Ozon. live_offer_ids: a fresh list from Ozon (the 03:00 job) --
+    else the catalog_live_offer_ids.json snapshot, plus the offers created today
+    (new_items_submitted.json). Real run 2026-11-27: the snapshot was from the day before, the
+    plan still counted ~800 offers uploaded that day and gave the whole 1000 to underwear."""
     import daily_plan
-    live = []
-    try:
-        with open(os.path.join(repo, "catalog_live_offer_ids.json"), encoding="utf-8") as f:
-            live = json.load(f).get("offer_ids") or []
-    except (OSError, ValueError, AttributeError):
-        pass
+    live = list(live_offer_ids or [])
+    if live_offer_ids is None:
+        try:
+            with open(os.path.join(repo, "catalog_live_offer_ids.json"), encoding="utf-8") as f:
+                live = json.load(f).get("offer_ids") or []
+        except (OSError, ValueError, AttributeError):
+            pass
+        try:
+            with open(os.path.join(repo, daily_plan.NEW_ITEMS_LOG), encoding="utf-8") as f:
+                live += json.load(f).get("new_offer_ids") or []
+        except (OSError, ValueError, AttributeError):
+            pass
     hm = None
     try:
         with open(os.path.join(repo, "hm_inventory.json"), encoding="utf-8") as f:
@@ -322,7 +345,7 @@ def load_candidates(repo=".", products_csv="products.csv"):
         pass
     ms = ms_candidates_from_csv(os.path.join(repo, products_csv), live_ms_tokens(live),
                                 daily_plan.category_label_for_name)
-    return ms + hm_candidates_from_inventory(hm)
+    return ms + hm_candidates_from_inventory(hm, live_hm_tokens(live))
 
 
 def plan_day_from_rules(rules, candidates):

@@ -77,6 +77,19 @@ def log(msg=""):
 
 # --- 1. what is left to create today -------------------------------------------------------
 
+def live_offer_ids_now():
+    """Every offer on Ozon now (read-only paging), so the plan does not count products uploaded
+    since the cached files were built. None if Ozon can't be read (the cached files are used)."""
+    try:
+        from catalog_status import live_offer_ids
+        ids = live_offer_ids()
+        log(f"Ozon: {len(ids)} offer(s) on the account (left out of the plan)")
+        return ids
+    except Exception as e:
+        log(f"Ozon offer list not read ({e}) -- plan uses the cached list")
+        return None
+
+
 def targets_for_today(today, test_products=None, test_offers=None):
     """-> (remaining dict from daily_plan.remaining_today, {(brand, label): offers wanted},
     open_brands) -- open_brands: brands that may take any category (fill_remainder with no
@@ -93,7 +106,8 @@ def targets_for_today(today, test_products=None, test_offers=None):
         # last saved ones decide now. The split per category comes from the cached data; the
         # site may differ a little, the reserve covers that.
         rules = pr.load_rules()
-        candidates = pr.load_candidates()
+        live = live_offer_ids_now()
+        candidates = pr.load_candidates() if live is None else pr.load_candidates(live_offer_ids=live)
         if test_products:
             first = pr.build_plan(dict(rules, daily_offers=max(rules["daily_offers"], 200)), candidates)
             first = sorted(first["products"], key=lambda p: -pr.WEIGHTS[p["level"]])[:test_products]
