@@ -43,6 +43,29 @@ def test_unreadable_listing_page_skips_section_not_run(monkeypatch):
     assert report["hm_skips"]["listing page unreadable"] == 1
 
 
+class DeepHM(FakeHM):
+    """30-page sections whose first 6 pages are already on Ozon (test run 2026-11-27 came up 96/100)."""
+    def listing(self, path, page):
+        self.calls.append((path, page))
+        return [{"article": f"{abs(hash(path)) % 10**4:04d}{page:03d}{i:03d}", "old": page <= 6}
+                for i in range(2)], 30
+
+
+def test_reads_past_page_6_while_short_and_stops_when_covered(monkeypatch):
+    _setup(monkeypatch)
+    monkeypatch.setattr(hm_catalog, "summarize_hit", lambda h: {"article": h["article"], "type_id": TYPE_ID_PANTIES,
+                                                                 "price_try": 100, "old": h["old"]})
+    monkeypatch.setattr(hm_catalog, "skip_reason", lambda rec, live: "already on Ozon" if rec["old"] else None)
+    monkeypatch.setattr(rnp, "needed", lambda *a: 4)          # goal 4 * OVERSHOOT offers
+    hm = DeepHM()
+    report = {"hm_found": {}}
+    out = rnp.hm_candidates(["Underwear"], {}, {}, report, hm)
+    goal = 4 * rnp.OVERSHOOT
+    assert len(out["Underwear"]) >= goal
+    assert max(p for _s, p in hm.calls) <= 6 + -(-goal // 2) + 1     # stopped soon after covering it
+    assert max(p for _s, p in hm.calls) > 6
+
+
 def test_unreadable_product_page_is_skipped(monkeypatch):
     _setup(monkeypatch)
     hm = FakeHM()

@@ -55,7 +55,10 @@ LOCK_FILE = "new_products.lock"
 OVERSHOOT = 1.5            # look at this many more offers than needed (checks drop some)
 MS_OVERSHOOT = 3.0         # M&S loses more at build (already on Ozon, unmapped size/colour)
 MAX_MS_PAGES_PER_LABEL = 60  # product pages fetched per M&S category at most
-HM_PAGES_PER_SECTION = 6   # listing pages (36 products each) read per H&M section at most
+# Listing pages (36 products each) read per H&M section at most; a section stops as soon as the
+# categories it supplies are covered. Was 6 -- test run 2026-11-27 14:06 came up 4 short (96/100)
+# once the first 6 pages were already on Ozon from the morning's 500.
+HM_PAGES_PER_SECTION = 25
 IMPORT_WAIT_S = 900
 HM_SECTIONS_FOR = {
     "Dress": ["elbise"], "Trousers": ["pantolon", "jean"], "Skirt": ["etek"], "Blouse": ["gomlek-bluz"],
@@ -272,10 +275,13 @@ def hm_candidates(labels, want, remaining, report, hm):
     out = defaultdict(list)
     seen = set()
     skips = Counter()
+    # labels each section can supply: a section is read only while one of them is still short
+    serves = {p: [l for l in labels if p in {f"/tr_tr/kadin/urune-gore-satin-al/{n}.html"
+                                             for n in HM_SECTIONS_FOR.get(l, [])}] for p in sections}
     for path in sections:
         page, total = 1, 1
         while page <= min(total, HM_PAGES_PER_SECTION):
-            if all(got[l] >= goal[l] for l in labels):
+            if all(got[l] >= goal[l] for l in serves[path] or labels):
                 break
             try:
                 hits, total = hm.listing(path, page)
